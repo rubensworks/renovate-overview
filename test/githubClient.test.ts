@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GitHubClient, asHttpError, describeError } from '../src/lib/githubClient';
 
-const { requestMock, constructorMock } = vi.hoisted(() => ({
+const { requestMock, graphqlMock, constructorMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
+  graphqlMock: vi.fn(),
   constructorMock: vi.fn(),
 }));
 
 vi.mock('@octokit/rest', () => ({
   Octokit: class FakeOctokit {
     public readonly request = requestMock;
+    public readonly graphql = graphqlMock;
 
     public constructor(options: unknown) {
       constructorMock(options);
@@ -53,6 +55,7 @@ class HttpError extends Error {
 
 beforeEach(() => {
   requestMock.mockReset();
+  graphqlMock.mockReset();
   constructorMock.mockReset();
 });
 
@@ -144,18 +147,25 @@ describe('GitHubClient', () => {
 
   describe('getViewer', () => {
     it('returns the authenticated user', async() => {
-      requestMock.mockResolvedValue(response({ login: 'rubensworks', name: 'Ruben Taelman' }));
-      await expect(new GitHubClient('t').getViewer())
-        .resolves.toEqual({ login: 'rubensworks', name: 'Ruben Taelman' });
+      requestMock.mockResolvedValue(response({
+        login: 'rubensworks',
+        name: 'Ruben Taelman',
+        avatar_url: 'https://avatars.githubusercontent.com/u/440384?v=4',
+      }));
+      await expect(new GitHubClient('t').getViewer()).resolves.toEqual({
+        login: 'rubensworks',
+        name: 'Ruben Taelman',
+        avatarUrl: 'https://avatars.githubusercontent.com/u/440384?v=4',
+      });
       expect(requestMock).toHaveBeenCalledWith('GET /user', containing({
         headers: containing({ 'x-github-api-version': '2022-11-28' }),
       }));
     });
 
     it('falls back to the login when the account has no name', async() => {
-      requestMock.mockResolvedValue(response({ login: 'rubensworks', name: null }));
+      requestMock.mockResolvedValue(response({ login: 'rubensworks', name: null, avatar_url: 'a.png' }));
       await expect(new GitHubClient('t').getViewer())
-        .resolves.toEqual({ login: 'rubensworks', name: 'rubensworks' });
+        .resolves.toEqual({ login: 'rubensworks', name: 'rubensworks', avatarUrl: 'a.png' });
     });
 
     it('propagates a failure, so the setup screen can report it', async() => {
@@ -186,7 +196,7 @@ describe('GitHubClient', () => {
     });
 
     it('records the quota reported by a response', async() => {
-      requestMock.mockResolvedValue(response({ login: 'a', name: null }));
+      requestMock.mockResolvedValue(response({ login: 'a', name: null, avatar_url: 'a.png' }));
       const client = new GitHubClient('t');
       await client.getViewer();
       expect(client.rateLimit).toEqual({ limit: 5000, remaining: 4999, reset: 1_700_000_000 });
@@ -200,28 +210,69 @@ describe('GitHubClient', () => {
     });
 
     it('ignores headers that do not carry a full quota', async() => {
-      requestMock.mockResolvedValue({ data: { login: 'a', name: null }, headers: {}});
+      requestMock.mockResolvedValue({ data: { login: 'a', name: null, avatar_url: 'a.png' }, headers: {}});
       const client = new GitHubClient('t');
       await client.getViewer();
       expect(client.rateLimit).toBeUndefined();
     });
   });
 
+  describe('graphql', () => {
+    const QUOTA = { limit: 5000, cost: 3, remaining: 4997, resetAt: '2026-08-17T18:00:00Z' };
+
+    it('runs the query and returns its data', async() => {
+      graphqlMock.mockResolvedValue({ search: { issueCount: 2 }});
+      const client = new GitHubClient('t');
+      await expect(client.graphql('query {}', { q: 'x' })).resolves.toEqual({ search: { issueCount: 2 }});
+      expect(graphqlMock).toHaveBeenCalledWith('query {}', { q: 'x' });
+    });
+
+    it('records the quota the response reports', async() => {
+      graphqlMock.mockResolvedValue({ rateLimit: QUOTA });
+      const client = new GitHubClient('t');
+      expect(client.graphqlRateLimit).toBeUndefined();
+      await client.graphql('query {}', {});
+      expect(client.graphqlRateLimit).toEqual(QUOTA);
+    });
+
+    it('keeps the last known quota when a response carries none', async() => {
+      graphqlMock.mockResolvedValueOnce({ rateLimit: QUOTA }).mockResolvedValueOnce({ rateLimit: null });
+      const client = new GitHubClient('t');
+      await client.graphql('query {}', {});
+      await client.graphql('query {}', {});
+      expect(client.graphqlRateLimit).toEqual(QUOTA);
+    });
+
+    it('uses an organisation token when the query is about that organisation', async() => {
+      graphqlMock.mockResolvedValue({});
+      const client = new GitHubClient('main', [{ owner: 'comunica', token: 'org' }]);
+      await client.graphql('query {}', {}, 'Comunica');
+      // Two Octokit instances exist; the organisation one answered.
+      expect(constructorMock).toHaveBeenCalledTimes(2);
+      expect(graphqlMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not swallow a failed query', async() => {
+      graphqlMock.mockRejectedValue(new Error('bad query'));
+      await expect(new GitHubClient('t').graphql('query {}', {})).rejects.toThrow('bad query');
+    });
+  });
+
   describe('conditional requests', () => {
     it('sends the stored ETag on a repeat request and reuses the cached body on a 304', async() => {
-      requestMock.mockResolvedValueOnce(response({ login: 'a', name: null }, { etag: 'W/"1"' }));
+      requestMock.mockResolvedValueOnce(response({ login: 'a', name: null, avatar_url: 'a.png' }, { etag: 'W/"1"' }));
       const client = new GitHubClient('t');
       await client.getViewer();
 
       requestMock.mockRejectedValueOnce(new HttpError(304, 'Not Modified'));
-      await expect(client.getViewer()).resolves.toEqual({ login: 'a', name: 'a' });
+      await expect(client.getViewer()).resolves.toEqual({ login: 'a', name: 'a', avatarUrl: 'a.png' });
       expect(requestMock).toHaveBeenLastCalledWith('GET /user', containing({
         headers: containing({ 'if-none-match': 'W/"1"' }),
       }));
     });
 
     it('does not cache a response without an ETag', async() => {
-      requestMock.mockResolvedValue(response({ login: 'a', name: null }));
+      requestMock.mockResolvedValue(response({ login: 'a', name: null, avatar_url: 'a.png' }));
       const client = new GitHubClient('t');
       await client.getViewer();
       await client.getViewer();

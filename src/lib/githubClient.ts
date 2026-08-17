@@ -1,5 +1,5 @@
 import { Octokit } from '@octokit/rest';
-import type { IOwnerToken, IRateLimit, IViewer } from './types';
+import type { IGraphqlRateLimit, IOwnerToken, IRateLimit, IViewer } from './types';
 
 const API_VERSION = '2022-11-28';
 const USER_AGENT = 'renovate-overview';
@@ -19,6 +19,7 @@ interface ICacheEntry {
 interface IApiUser {
   login: string;
   name: string | null;
+  avatar_url: string;
 }
 
 /**
@@ -76,14 +77,15 @@ export function describeError(error: unknown): string {
  * route + parameters is known. GitHub answers unchanged resources with a `304 Not Modified`,
  * which does not count against the REST rate limit, so polling stays cheap.
  *
- * The only host it ever contacts is `api.github.com`, and the tokens it holds are only ever
- * attached to requests going there.
+ * The only host it contacts is `api.github.com`, and the tokens it holds are only ever attached
+ * to requests going there.
  */
 export class GitHubClient {
   private readonly octokit: Octokit;
   private readonly byOwner = new Map<string, Octokit>();
   private readonly cache = new Map<string, ICacheEntry>();
   private rateLimitValue: IRateLimit | undefined;
+  private graphqlRateLimitValue: IGraphqlRateLimit | undefined;
 
   /**
    * @param token A personal access token. Every request carries one: unlike a per-repository
@@ -108,6 +110,35 @@ export class GitHubClient {
   }
 
   /**
+   * The quota left on the GraphQL API, which is counted in points rather than requests and so is
+   * tracked apart from the REST one.
+   */
+  public get graphqlRateLimit(): IGraphqlRateLimit | undefined {
+    return this.graphqlRateLimitValue;
+  }
+
+  /**
+   * Runs a GraphQL query and records the quota it reports.
+   *
+   * GraphQL has no equivalent of a conditional request — every query costs points whether or not
+   * anything changed — so this deliberately has no ETag cache behind it.
+   * @param query A GraphQL document.
+   * @param variables Its variables.
+   * @param owner The owner this query is about, so the right token is used.
+   */
+  public async graphql<T>(query: string, variables: Record<string, unknown>, owner?: string): Promise<T> {
+    const data = await this.clientFor(owner).graphql<T & { rateLimit?: IGraphqlRateLimit | null }>(
+      query,
+      variables,
+    );
+    const quota = data.rateLimit;
+    if (quota !== null && quota !== undefined) {
+      this.graphqlRateLimitValue = quota;
+    }
+    return data;
+  }
+
+  /**
    * Verifies the token and returns the authenticated user.
    *
    * This doubles as the token check on the setup screen: an invalid token fails here rather than
@@ -115,7 +146,7 @@ export class GitHubClient {
    */
   public async getViewer(): Promise<IViewer> {
     const { data } = await this.conditionalRequest<IApiUser>('GET /user', {});
-    return { login: data.login, name: data.name ?? data.login };
+    return { login: data.login, name: data.name ?? data.login, avatarUrl: data.avatar_url };
   }
 
   /**

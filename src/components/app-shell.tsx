@@ -21,8 +21,8 @@ export interface IAppShellProps {
  * The frame around the dashboard: who is signed in, whether the app may write, the settings
  * drawer, and the way out.
  *
- * The viewer is shown by login only. Rendering their avatar would make the browser fetch from
- * `avatars.githubusercontent.com`, and `api.github.com` is the only host this app contacts.
+ * The viewer's avatar is the one thing loaded from a host other than `api.github.com`. It is a
+ * plain `<img>`, so no token travels with it.
  */
 export function AppShell(props: IAppShellProps) {
   const { viewer, settings, onLeave, children } = props;
@@ -42,7 +42,10 @@ export function AppShell(props: IAppShellProps) {
           {settings.writeActions ? 'Write actions on' : 'Read-only'}
         </span>
         <span className="header__spacer" />
-        <span className="header__viewer">{viewer.login}</span>
+        <span className="header__viewer">
+          <img className="header__avatar" src={viewer.avatarUrl} alt="" width={20} height={20} />
+          {viewer.login}
+        </span>
         <button
           className={`button button--ghost ${settingsOpen ? 'button--active' : ''}`}
           type="button"
@@ -76,7 +79,8 @@ export function AppShell(props: IAppShellProps) {
           rubensworks/renovate-overview
         </a>
         <span className="footer__note">
-          Your token stays in this browser; the only host contacted is api.github.com.
+          Your token stays in this browser; the only hosts contacted are api.github.com and the
+          avatar CDN.
         </span>
       </footer>
     </div>

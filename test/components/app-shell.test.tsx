@@ -17,7 +17,7 @@ const SETTINGS: ISettings = {
 
 function renderShell(overrides: Partial<IAppShellProps> = {}) {
   const props: IAppShellProps = {
-    viewer: { login: 'rubensworks', name: 'Ruben Taelman' },
+    viewer: { login: 'rubensworks', name: 'Ruben Taelman', avatarUrl: 'https://avatars.githubusercontent.com/u/440384?v=4' },
     settings: SETTINGS,
     tokenLocation: 'local',
     ownerTokens: [],
@@ -44,9 +44,14 @@ describe('AppShell', () => {
     expect(screen.getByText('rubensworks')).toBeDefined();
   });
 
-  it('never fetches an avatar, since api.github.com is the only host contacted', () => {
+  it('loads the avatar from the one non-API host, with no token attached', () => {
     renderShell();
-    expect(document.querySelectorAll('img')).toHaveLength(0);
+    const avatars = document.querySelectorAll('img');
+    expect(avatars).toHaveLength(1);
+    expect(avatars[0]?.getAttribute('src'))
+      .toBe('https://avatars.githubusercontent.com/u/440384?v=4');
+    // Decorative: the login beside it already names the user.
+    expect(avatars[0]?.getAttribute('alt')).toBe('');
   });
 
   it('says the app is read-only until the write actions are switched on', () => {
@@ -86,6 +91,6 @@ describe('AppShell', () => {
     renderShell();
     const link = screen.getByRole('link', { name: 'rubensworks/renovate-overview' });
     expect(link.getAttribute('href')).toBe(SOURCE_URL);
-    expect(document.body.textContent).toContain('the only host contacted is api.github.com');
+    expect(document.body.textContent).toContain('the only hosts contacted are api.github.com');
   });
 });

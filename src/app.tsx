@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppShell } from './components/app-shell';
+import { Dashboard } from './components/dashboard';
 import { SetupScreen } from './components/setup-screen';
 import { GitHubClient, describeError } from './lib/githubClient';
 import {
@@ -13,7 +14,79 @@ import {
   saveToken,
   tokenLocation,
 } from './lib/storage';
+import { DashboardStore } from './lib/store';
 import type { IOwnerToken, ISettings, IViewer, TokenLocation } from './lib/types';
+
+/**
+ * A checked token and the account it belongs to. The two are never apart: a viewer without the
+ * token that proved it could not fetch anything.
+ */
+interface ISession {
+  token: string;
+  viewer: IViewer;
+}
+
+interface ISignedInProps {
+  session: ISession;
+  settings: ISettings;
+  tokenLocation: TokenLocation;
+  ownerTokens: IOwnerToken[];
+  onSettingsChange: (settings: ISettings) => void;
+  onTokenSave: (token: string, remember: boolean) => Promise<void>;
+  onTokenRemove: () => void;
+  onOwnerTokenSave: (owner: string, token: string) => Promise<void>;
+  onOwnerTokenRemove: (owner: string) => void;
+  onLeave: () => void;
+}
+
+/**
+ * Everything that only exists while signed in, most of all the store.
+ *
+ * Keeping this apart from {@link App} is what makes the store's lifetime exactly the session's:
+ * signing out unmounts it, and swapping a token builds a new one instead of leaving one account's
+ * rows sitting under another account's token.
+ */
+export function SignedIn(props: ISignedInProps) {
+  const { session, settings, ownerTokens } = props;
+
+  const store = useMemo(
+    () => new DashboardStore(
+      new GitHubClient(session.token, ownerTokens),
+      session.viewer.login,
+      settings,
+      ownerTokens,
+    ),
+    // Settings are deliberately not a dependency: they are pushed into the store by the effect
+    // below, so changing one re-searches without throwing the rows away and rebuilding the client.
+    [ session, ownerTokens ],
+  );
+
+  useEffect(() => {
+    void store.refresh();
+    return () => store.dispose();
+  }, [ store ]);
+
+  useEffect(() => {
+    store.configure(settings, ownerTokens);
+  }, [ store, settings, ownerTokens ]);
+
+  return (
+    <AppShell
+      viewer={session.viewer}
+      settings={settings}
+      tokenLocation={props.tokenLocation}
+      ownerTokens={ownerTokens}
+      onSettingsChange={props.onSettingsChange}
+      onTokenSave={props.onTokenSave}
+      onTokenRemove={props.onTokenRemove}
+      onOwnerTokenSave={props.onOwnerTokenSave}
+      onOwnerTokenRemove={props.onOwnerTokenRemove}
+      onLeave={props.onLeave}
+    >
+      <Dashboard store={store} />
+    </AppShell>
+  );
+}
 
 /**
  * The application root: owns the session and the persisted settings.
@@ -23,7 +96,7 @@ import type { IOwnerToken, ISettings, IViewer, TokenLocation } from './lib/types
  */
 export function App() {
   const [ settings, setSettings ] = useState<ISettings>(() => loadSettings());
-  const [ viewer, setViewer ] = useState<IViewer | undefined>();
+  const [ session, setSession ] = useState<ISession | undefined>();
   const [ booting, setBooting ] = useState(true);
   const [ authError, setAuthError ] = useState<string | undefined>();
   const [ tokenAt, setTokenAt ] = useState<TokenLocation>(() => tokenLocation());
@@ -35,9 +108,9 @@ export function App() {
 
   // Both ways in check the token before storing it, so a typo never ends up persisted.
   const connect = useCallback(async(fresh: string, remember: boolean) => {
-    let checked: IViewer;
+    let viewer: IViewer;
     try {
-      checked = await new GitHubClient(fresh, ownerTokens).getViewer();
+      viewer = await new GitHubClient(fresh, ownerTokens).getViewer();
     } catch (error: unknown) {
       throw new Error(describeError(error));
     }
@@ -45,7 +118,7 @@ export function App() {
     saveOwnerTokens(ownerTokens, remember);
     setTokenAt(remember ? 'local' : 'session');
     setAuthError(undefined);
-    setViewer(checked);
+    setSession({ token: fresh, viewer });
   }, [ ownerTokens ]);
 
   // An organisation token is checked against the organisation listing before it is kept, since
@@ -82,7 +155,7 @@ export function App() {
   const removeToken = useCallback(() => {
     clearToken();
     setTokenAt('none');
-    setViewer(undefined);
+    setSession(undefined);
   }, []);
 
   useEffect(() => {
@@ -94,9 +167,9 @@ export function App() {
     }
     let cancelled = false;
     new GitHubClient(stored.token, loadOwnerTokens()).getViewer()
-      .then((checked) => {
+      .then((viewer) => {
         if (!cancelled) {
-          setViewer(checked);
+          setSession({ token: stored.token, viewer });
         }
       })
       .catch((error: unknown) => {
@@ -126,7 +199,7 @@ export function App() {
     clearOwnerTokens();
     setOwnerTokens([]);
     setTokenAt('none');
-    setViewer(undefined);
+    setSession(undefined);
     setAuthError(undefined);
   }, []);
 
@@ -134,13 +207,13 @@ export function App() {
     return <div className="boot">Checking stored token…</div>;
   }
 
-  if (viewer === undefined) {
+  if (session === undefined) {
     return <SetupScreen onConnect={connect} initialError={authError} />;
   }
 
   return (
-    <AppShell
-      viewer={viewer}
+    <SignedIn
+      session={session}
       settings={settings}
       tokenLocation={tokenAt}
       ownerTokens={ownerTokens}
@@ -150,10 +223,6 @@ export function App() {
       onOwnerTokenSave={saveOwnerToken}
       onOwnerTokenRemove={removeOwnerToken}
       onLeave={leave}
-    >
-      <p className="placeholder">
-        Signed in as {viewer.login}. The pull request list arrives in the next milestone.
-      </p>
-    </AppShell>
+    />
   );
 }

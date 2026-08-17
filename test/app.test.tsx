@@ -2,10 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/app';
 import type { IViewer } from '../src/lib/types';
+import { node, page } from './fixtures';
 
-const { getViewerMock, checkOrgAccessMock, constructorMock } = vi.hoisted(() => ({
+const { getViewerMock, checkOrgAccessMock, graphqlMock, constructorMock } = vi.hoisted(() => ({
   getViewerMock: vi.fn(),
   checkOrgAccessMock: vi.fn(),
+  graphqlMock: vi.fn(),
   constructorMock: vi.fn(),
 }));
 
@@ -13,6 +15,8 @@ vi.mock('../src/lib/githubClient', () => ({
   GitHubClient: class FakeClient {
     public readonly getViewer = getViewerMock;
     public readonly checkOrgAccess = checkOrgAccessMock;
+    public readonly graphql = graphqlMock;
+    public readonly graphqlRateLimit = undefined;
 
     public constructor(token: string, ownerTokens: unknown) {
       constructorMock(token, ownerTokens);
@@ -26,12 +30,14 @@ const TOKEN_KEY = 'renovate-overview:token';
 const OWNER_TOKENS_KEY = 'renovate-overview:owner-tokens';
 const SETTINGS_KEY = 'renovate-overview:settings';
 
-const VIEWER: IViewer = { login: 'rubensworks', name: 'Ruben Taelman' };
+const VIEWER: IViewer = { login: 'rubensworks', name: 'Ruben Taelman', avatarUrl: 'https://avatars.githubusercontent.com/u/440384?v=4' };
 
 beforeEach(() => {
   getViewerMock.mockReset();
   checkOrgAccessMock.mockReset();
   constructorMock.mockReset();
+  graphqlMock.mockReset();
+  graphqlMock.mockResolvedValue(page([]));
   localStorage.clear();
   sessionStorage.clear();
   delete document.documentElement.dataset.theme;
@@ -150,6 +156,44 @@ describe('App', () => {
         expect(screen.getByRole('alert').textContent).toBe('Token is invalid or expired'));
       expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
       expect(sessionStorage.getItem(TOKEN_KEY)).toBeNull();
+    });
+  });
+
+  describe('the dashboard', () => {
+    it('searches as soon as the session exists, and lists what comes back', async() => {
+      localStorage.setItem(TOKEN_KEY, 'stored');
+      getViewerMock.mockResolvedValue(VIEWER);
+      graphqlMock.mockResolvedValue(page([ node() ]));
+      render(<App />);
+
+      expect(await screen.findByText('rubensworks/jbr.js')).toBeDefined();
+      const [ , variables ] = graphqlMock.mock.calls[0] as [string, { q: string }];
+      expect(variables.q).toContain('user:rubensworks');
+    });
+
+    it('rebuilds the store when the token is replaced, rather than keeping the old rows', async() => {
+      localStorage.setItem(TOKEN_KEY, 'stored');
+      getViewerMock.mockResolvedValue(VIEWER);
+      graphqlMock.mockResolvedValue(page([ node() ]));
+      render(<App />);
+      await screen.findByText('rubensworks/jbr.js');
+      const before = graphqlMock.mock.calls.length;
+
+      await openSettings();
+      fireEvent.change(screen.getByLabelText('Replace it'), { target: { value: 'fresh' }});
+      fireEvent.click(screen.getByRole('button', { name: 'Save token' }));
+
+      await waitFor(() => expect(graphqlMock.mock.calls.length).toBeGreaterThan(before));
+      expect(constructorMock).toHaveBeenCalledWith('fresh', []);
+    });
+
+    it('surfaces a failed search in the status strip', async() => {
+      localStorage.setItem(TOKEN_KEY, 'stored');
+      getViewerMock.mockResolvedValue(VIEWER);
+      graphqlMock.mockRejectedValue(new Error('Rate limit exceeded'));
+      render(<App />);
+
+      expect(await screen.findByText('Rate limit exceeded')).toBeDefined();
     });
   });
 

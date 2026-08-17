@@ -16,9 +16,12 @@ around it.
 
 1. **No backend.** The build output is a directory of static files, deployable to GitHub Pages. No
    server, no serverless function, no proxy, no database.
-2. **`https://api.github.com` is the only host contacted at runtime.** Both the REST and the GraphQL
-   endpoint on that host are fine. No analytics, no error reporting, no CDN fonts, no third-party
-   scripts. Any font or icon asset is self-hosted in the bundle.
+2. **Only GitHub's own hosts are contacted at runtime**, and only these two:
+   `https://api.github.com` for all data (REST and GraphQL alike), and
+   `https://avatars.githubusercontent.com` for avatar images, which the owner explicitly allowed.
+   An avatar is a plain `<img>`, so no token travels with it. Nothing else: no analytics, no error
+   reporting, no CDN fonts, no third-party scripts. Any font or icon asset is self-hosted in the
+   bundle, and any further host needs the owner's say-so.
 3. **No Renovate network calls.** Renovate is a bot that writes to GitHub: the hosted Mend app has
    no public read API and self-hosted Renovate has none at all. Everything needed (PR title, body,
    branch name, labels, checks, the Dependency Dashboard issue, the rebase checkbox) already lives
@@ -33,8 +36,9 @@ around it.
 ## Stack
 
 - Vite + React + TypeScript, `strict` mode.
-- `@octokit/rest` for REST and `@octokit/graphql` for GraphQL, both wrapped in a single
-  `src/lib/githubClient.ts` so tests can mock at that module boundary.
+- `@octokit/rest` for both REST and GraphQL — Octokit's own `graphql()` is `@octokit/graphql`
+  underneath, so pulling the package in separately would only add a second mock boundary. Both are
+  wrapped in a single `src/lib/githubClient.ts` so tests mock one module.
 - Vitest + `@testing-library/react` + jsdom. **No live network calls in tests, ever.**
 - ESLint via `@rubensworks/eslint-config`.
 - Scripts: `dev`, `build`, `preview`, `lint`, `test`, `test:watch`.
@@ -179,5 +183,5 @@ Stop at each milestone and wait for review before continuing.
 
 - If search results approach 1000 and per-owner splitting is still not enough.
 - If a Renovate title format cannot be handled without making the parser unreadable.
-- If any feature seems to require a host other than `api.github.com`.
+- If any feature seems to require a host beyond `api.github.com` and the avatar CDN.
 - If a write action needs a permission beyond those documented in the README.

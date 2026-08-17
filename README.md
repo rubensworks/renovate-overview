@@ -13,16 +13,19 @@ GitHub's own search can list your Renovate PRs. What it cannot tell you is that 
 waiting in 14 repositories, 12 of them green and 2 red — which is exactly the view that makes a
 large backlog tractable.
 
-> **Status:** in development. Authentication works — paste a token and the app signs you in, keeps
-> per-organisation tokens, and stays read-only until you say otherwise. The pull request list, the
-> parser and the actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
+> **Status:** in development. Paste a token and you get the whole backlog: every open Renovate pull
+> request across your account and your organisations, one dense line each, coloured by CI result,
+> expandable to its individual checks. Grouping by dependency, filtering, sorting and the bulk
+> actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
 
 ## How it works
 
 There is no backend. The build output is a directory of static files served from GitHub Pages, and
-the only host contacted at runtime is `https://api.github.com`. Your token is read from browser
+the only hosts contacted at runtime are `https://api.github.com` for every piece of data and
+`https://avatars.githubusercontent.com` for your avatar image. Your token is read from browser
 storage and attached as an `Authorization` header on requests your browser makes directly to
-GitHub — it is never sent anywhere else, and it never appears in a URL.
+GitHub — it is never sent anywhere else, it never appears in a URL, and an avatar `<img>` carries
+no `Authorization` header at all.
 
 Renovate itself is never contacted: it is a bot that writes to GitHub, so everything this dashboard
 needs — PR titles, bodies, branch names, labels, checks, the rebase checkbox — already lives in

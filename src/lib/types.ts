@@ -7,13 +7,15 @@ export type Theme = 'auto' | 'dark' | 'light';
 
 /**
  * The authenticated user.
- *
- * Deliberately without an avatar URL: rendering one would make the browser fetch from
- * `avatars.githubusercontent.com`, and `api.github.com` is the only host this app contacts.
  */
 export interface IViewer {
   login: string;
   name: string;
+  /**
+   * Loaded from `avatars.githubusercontent.com`, the one host besides `api.github.com` this app
+   * reaches. An `<img>` carries no `Authorization` header, so the token is not involved.
+   */
+  avatarUrl: string;
 }
 
 export interface IRateLimit {
@@ -60,6 +62,111 @@ export interface ISettings {
    */
   writeActions: boolean;
   theme: Theme;
+}
+
+/**
+ * The state of a pull request's checks, rolled up into the one thing the row is coloured by.
+ *
+ * `none` is its own state rather than a kind of failure: a head commit with no checks at all is
+ * the normal case in a repository without CI, and colouring it red would be a lie.
+ */
+export type CheckState = 'error' | 'failure' | 'none' | 'pending' | 'success';
+
+export const CHECK_STATE_LABELS: Record<CheckState, string> = {
+  success: 'Passing',
+  failure: 'Failing',
+  pending: 'Running',
+  error: 'Errored',
+  none: 'No checks',
+};
+
+export interface IPrCheck {
+  name: string;
+  state: CheckState;
+  url: string | undefined;
+}
+
+/**
+ * GitHub computes mergeability asynchronously, so `UNKNOWN` means "ask again", not "conflicting".
+ */
+export type Mergeable = 'CONFLICTING' | 'MERGEABLE' | 'UNKNOWN';
+
+export type ReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
+
+/**
+ * One open pull request from a dependency bot, as the dashboard holds it.
+ *
+ * This is raw GitHub data only. What the pull request actually updates is parsed separately, so
+ * the parser can be tested without a single API shape in sight.
+ */
+export interface IRenovatePr {
+  /**
+   * The GraphQL node id, stable across refreshes and used as the identity everywhere.
+   */
+  id: string;
+  /**
+   * `owner/name`.
+   */
+  repo: string;
+  owner: string;
+  number: number;
+  title: string;
+  url: string;
+  branch: string;
+  baseBranch: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  isDraft: boolean;
+  isPrivate: boolean;
+  labels: string[];
+  mergeable: Mergeable;
+  reviewDecision: ReviewDecision;
+  /**
+   * Whether the viewer's permission on the repository is enough to merge it themselves.
+   */
+  viewerCanMerge: boolean;
+  checkState: CheckState;
+  checks: IPrCheck[];
+  headSha: string;
+}
+
+/**
+ * The GraphQL quota, which is counted in points rather than requests and is therefore reported
+ * separately from the REST one.
+ */
+export interface IGraphqlRateLimit {
+  limit: number;
+  cost: number;
+  remaining: number;
+  /**
+   * ISO 8601 timestamp at which the quota resets.
+   */
+  resetAt: string;
+}
+
+/**
+ * An owner whose result set hit GitHub's 1000-result search ceiling, so its list is incomplete.
+ */
+export interface ITruncatedScope {
+  label: string;
+  count: number;
+}
+
+export interface IDashboardState {
+  prs: IRenovatePr[];
+  loading: boolean;
+  error: string | undefined;
+  /**
+   * How many pull requests GitHub says match, which can exceed what it will actually hand over.
+   */
+  totalCount: number;
+  rateLimit: IGraphqlRateLimit | undefined;
+  lastRefreshedAt: number | undefined;
+  /**
+   * Scopes whose results were cut off at the search ceiling even after splitting per owner.
+   */
+  truncated: ITruncatedScope[];
 }
 
 /**

@@ -41,8 +41,8 @@ export function SetupScreen({ onConnect, initialError }: ISetupScreenProps) {
           Every open Renovate pull request across your repositories and organisations, in one list —
           grouped by dependency, so you can see that <code>@types/node</code> is waiting in fourteen
           repositories rather than meeting it fourteen times. Everything runs in this browser tab:
-          there is no server, and the only host this page ever talks to is <code>api.github.com</code>.
-          Don&apos;t take our word for it:{' '}
+          there is no server, and the only host this page talks to for data is{' '}
+          <code>api.github.com</code>. Don&apos;t take our word for it:{' '}
           <a className="link" href={SOURCE_URL} target="_blank" rel="noreferrer noopener">
             read the source
           </a>.
@@ -134,9 +134,10 @@ export function SetupScreen({ onConnect, initialError }: ISetupScreenProps) {
             Into your browser, and nowhere else. It is kept in <code>localStorage</code> (or in{' '}
             <code>sessionStorage</code> when you tick the box above) and sent as an{' '}
             <code>Authorization</code> header on requests that go straight from this tab to{' '}
-            <code>api.github.com</code>. There is no backend to send it to, and no other host is
-            ever contacted — not even for a font or an avatar. “Sign out” wipes it from both
-            storages.
+            <code>api.github.com</code>. There is no backend to send it to. The only other host this
+            page reaches is <code>avatars.githubusercontent.com</code>, for your avatar image — an{' '}
+            <code>&lt;img&gt;</code> carries no <code>Authorization</code> header, so your token is
+            not involved. “Sign out” wipes it from both storages.
           </p>
         </section>
 
