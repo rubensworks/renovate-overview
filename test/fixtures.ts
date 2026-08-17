@@ -1,5 +1,5 @@
 import { resolveUpdates } from '../src/lib/renovate/resolve';
-import type { IApiNode, ISearchPage } from '../src/lib/search';
+import type { IApiPullRequest, IApiSearchItem, ISearchResponse } from '../src/lib/search';
 import type { IRenovatePr, ISettings } from '../src/lib/types';
 
 export const SETTINGS: ISettings = {
@@ -13,71 +13,51 @@ export const SETTINGS: ISettings = {
 };
 
 /**
- * A search result node, in the shape the GraphQL query asks for.
+ * One item of a `GET /search/issues` response.
  * @param overrides Fields to change.
  */
-export function node(overrides: Record<string, unknown> = {}): IApiNode {
+export function searchItem(overrides: Partial<IApiSearchItem> = {}): IApiSearchItem {
   return {
-    id: 'PR_1',
     number: 42,
     title: 'Update dependency lodash to v4.17.21',
-    url: 'https://github.com/rubensworks/jbr.js/pull/42',
-    headRefName: 'renovate/lodash-4.x',
-    baseRefName: 'master',
-    headRefOid: 'deadbeef',
-    createdAt: '2026-08-01T10:00:00Z',
-    updatedAt: '2026-08-10T10:00:00Z',
-    isDraft: false,
-    mergeable: 'MERGEABLE',
-    reviewDecision: null,
-    author: { login: 'renovate[bot]' },
-    labels: { nodes: [{ name: 'dependencies' }]},
-    repository: {
-      nameWithOwner: 'rubensworks/jbr.js',
-      isPrivate: false,
-      viewerPermission: 'ADMIN',
-      owner: { login: 'rubensworks' },
-    },
-    commits: {
-      nodes: [{
-        commit: {
-          oid: 'deadbeef',
-          statusCheckRollup: {
-            state: 'SUCCESS',
-            contexts: {
-              totalCount: 1,
-              nodes: [{ name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://ci' }],
-            },
-          },
-        },
-      }],
-    },
+    html_url: 'https://github.com/rubensworks/jbr.js/pull/42',
+    state: 'open',
+    draft: false,
+    body: null,
+    created_at: '2026-08-01T10:00:00Z',
+    updated_at: '2026-08-10T10:00:00Z',
+    user: { login: 'renovate[bot]' },
+    labels: [{ name: 'dependencies' }],
+    repository_url: 'https://api.github.com/repos/rubensworks/jbr.js',
+    pull_request: { url: 'https://api.github.com/repos/rubensworks/jbr.js/pulls/42' },
     ...overrides,
   };
 }
 
 /**
- * One page of search results.
- * @param nodes The result nodes.
- * @param overrides Fields to change on the page itself.
- * @param overrides.issueCount How many results GitHub claims to have.
- * @param overrides.hasNextPage Whether another page follows.
- * @param overrides.endCursor The cursor of the next page.
+ * A page of search results.
+ * @param items The items on this page.
+ * @param totalCount How many results GitHub claims to have, defaulting to the page size.
  */
-export function page(
-  nodes: (IApiNode | null)[] = [ node() ],
-  overrides: { issueCount?: number; hasNextPage?: boolean; endCursor?: string | null } = {},
-): ISearchPage {
+export function searchPage(items: (IApiSearchItem | null)[] = [ searchItem() ], totalCount?: number): ISearchResponse {
+  return { total_count: totalCount ?? items.length, incomplete_results: false, items };
+}
+
+/**
+ * A `GET /repos/{owner}/{repo}/pulls/{number}` response.
+ * @param overrides Fields to change.
+ */
+export function prDetail(overrides: Partial<IApiPullRequest> = {}): IApiPullRequest {
   return {
-    rateLimit: { limit: 5000, cost: 1, remaining: 4987, resetAt: '2026-08-17T18:00:00Z' },
-    search: {
-      issueCount: overrides.issueCount ?? nodes.length,
-      pageInfo: {
-        hasNextPage: overrides.hasNextPage ?? false,
-        endCursor: overrides.endCursor === undefined ? 'CURSOR' : overrides.endCursor,
-      },
-      nodes,
-    },
+    number: 42,
+    state: 'open',
+    body: null,
+    draft: false,
+    mergeable: true,
+    updated_at: '2026-08-10T10:00:00Z',
+    head: { ref: 'renovate/lodash-4.x', sha: 'deadbeef' },
+    base: { ref: 'master', repo: { private: false, permissions: { push: true }}},
+    ...overrides,
   };
 }
 
@@ -87,7 +67,7 @@ export function page(
  */
 export function pr(overrides: Partial<IRenovatePr> = {}): IRenovatePr {
   const base: IRenovatePr = {
-    id: 'PR_1',
+    id: 'rubensworks/jbr.js#42',
     repo: 'rubensworks/jbr.js',
     owner: 'rubensworks',
     number: 42,
@@ -107,6 +87,7 @@ export function pr(overrides: Partial<IRenovatePr> = {}): IRenovatePr {
     checkState: 'success',
     checks: [{ name: 'build', state: 'success', url: 'https://ci' }],
     headSha: 'deadbeef',
+    detailLoaded: true,
     parse: {
       updates: [],
       isGroupPr: false,

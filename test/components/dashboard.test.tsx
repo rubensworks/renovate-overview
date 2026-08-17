@@ -21,7 +21,7 @@ afterEach(() => {
  */
 class FakeStore {
   public readonly refresh = vi.fn(async() => {});
-  public readonly loadBodies = vi.fn(async() => {});
+  public readonly loadReviewDecision = vi.fn(async() => {});
   public readonly runActions = vi.fn(async() => {});
   public readonly clearActionRun = vi.fn();
   public readonly setSelection = vi.fn((ids: string[]) => this.set({ selected: [ ...new Set(ids) ]}));
@@ -181,21 +181,16 @@ describe('Dashboard', () => {
     });
   });
 
-  describe('bodies', () => {
-    it('fetches them when grouping by dependency, where a group needs its members', () => {
-      const store = renderDashboard({ prs: [ GREEN, RED ]}, '#g=dependency');
-      expect(store.loadBodies).toHaveBeenCalledWith([ 'g', 'r' ]);
-    });
-
-    it('leaves them alone in a flat list', () => {
-      const store = renderDashboard({ prs: [ GREEN ]});
-      expect(store.loadBodies).not.toHaveBeenCalled();
-    });
-
-    it('asks for one when its row is expanded', () => {
+  describe('review decisions', () => {
+    it('asks for one when a row is expanded, since REST charges a request for it', () => {
       const store = renderDashboard({ prs: [ GREEN ]});
       fireEvent.click(screen.getByRole('button', { name: /Expand/u }));
-      expect(store.loadBodies).toHaveBeenCalledWith([ 'g' ]);
+      expect(store.loadReviewDecision).toHaveBeenCalledWith('g');
+    });
+
+    it('asks for nothing while the rows are merely listed', () => {
+      const store = renderDashboard({ prs: [ GREEN, RED ]}, '#g=dependency');
+      expect(store.loadReviewDecision).not.toHaveBeenCalled();
     });
   });
 

@@ -66,7 +66,7 @@ describe('GroupHeader', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Select 1 ready to merge' }));
     // The draft is not ready, so it is left out.
-    expect(selected).toEqual([[ 'PR_1' ]]);
+    expect(selected).toEqual([[ 'rubensworks/jbr.js#42' ]]);
   });
 
   it('offers to select everything in the group', () => {
@@ -80,7 +80,7 @@ describe('GroupHeader', () => {
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
-    expect(selected).toEqual([[ 'PR_1', 'b' ]]);
+    expect(selected).toEqual([[ 'rubensworks/jbr.js#42', 'b' ]]);
   });
 
   it('says nothing about merging when nothing is ready', () => {

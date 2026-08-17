@@ -1,5 +1,5 @@
 import { quotaRatio } from '../lib/store';
-import { formatRelative, formatUntil } from '../lib/time';
+import { formatRelative, formatUntilUnix } from '../lib/time';
 import type { IDashboardState } from '../lib/types';
 
 export interface IStatusFooterProps {
@@ -11,7 +11,7 @@ export interface IStatusFooterProps {
  * The status bar: what the dashboard is doing, what went wrong, and what quota is left.
  */
 export function StatusFooter({ state, now }: IStatusFooterProps) {
-  const { rateLimit, restRateLimit } = state;
+  const { rateLimit, searchRateLimit } = state;
   const ratio = quotaRatio(rateLimit);
   const level = ratio > 0.25 ? 'ok' : (ratio > 0.05 ? 'warn' : 'low');
   const holdUntil = state.backoffUntil;
@@ -25,7 +25,7 @@ export function StatusFooter({ state, now }: IStatusFooterProps) {
     polling = 'Paused — tab is hidden';
     dot = 'paused';
   } else if (holdUntil !== undefined && holdUntil > now) {
-    polling = `${state.backoffReason ?? 'Backing off'} (${formatUntil(new Date(holdUntil).toISOString(), now)})`;
+    polling = `${state.backoffReason ?? 'Backing off'} (${formatUntilUnix(holdUntil / 1000, now)})`;
     dot = 'paused';
   } else {
     polling = `${state.prs.length} open`;
@@ -57,17 +57,17 @@ export function StatusFooter({ state, now }: IStatusFooterProps) {
         <span className="status__item status__item--error" title={state.error}>{state.error}</span>}
 
       {rateLimit === undefined ?
-        <span className="status__item status__item--muted">GraphQL quota unknown</span> :
+        <span className="status__item status__item--muted">API quota unknown</span> :
           (
             <span className={`status__quota status__quota--${level}`}>
               <span className="status__quota-bar">
                 <span className="status__quota-fill" style={{ width: `${Math.max(2, ratio * 100)}%` }} />
               </span>
-              {rateLimit.remaining}/{rateLimit.limit} GraphQL points · last query cost{' '}
-              {rateLimit.cost} · resets in {formatUntil(rateLimit.resetAt, now)}
-              {restRateLimit === undefined ?
+              {rateLimit.remaining}/{rateLimit.limit} API calls left · resets in{' '}
+              {formatUntilUnix(rateLimit.reset, now)}
+              {searchRateLimit === undefined ?
                 null :
-                <> · {restRateLimit.remaining}/{restRateLimit.limit} REST</>}
+                <> · {searchRateLimit.remaining}/{searchRateLimit.limit} searches</>}
             </span>
           )}
     </div>

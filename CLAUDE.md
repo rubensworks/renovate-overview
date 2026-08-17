@@ -36,9 +36,8 @@ around it.
 ## Stack
 
 - Vite + React + TypeScript, `strict` mode.
-- `@octokit/rest` for both REST and GraphQL — Octokit's own `graphql()` is `@octokit/graphql`
-  underneath, so pulling the package in separately would only add a second mock boundary. Both are
-  wrapped in a single `src/lib/githubClient.ts` so tests mock one module.
+- `@octokit/rest`, wrapped in a single `src/lib/githubClient.ts` so tests mock one module. No
+  GraphQL client, because GraphQL cannot be reached from a browser — see below.
 - Vitest + `@testing-library/react` + jsdom. **No live network calls in tests, ever.**
 - ESLint via `@rubensworks/eslint-config`.
 - Scripts: `dev`, `build`, `preview`, `lint`, `test`, `test:watch`.
@@ -89,34 +88,50 @@ clear read-only indicator. A first-run user must get value from a token with no 
 
 ## Fetching
 
-GraphQL search is the primary path: one query returns the PRs *and* their check rollups together.
-The query is built from `viewer { login }` (resolved once and cached) plus the configured orgs:
+**REST only. GitHub's GraphQL API cannot be called from a browser at all** — it answers a CORS
+preflight with `403` and no `Access-Control-Allow-Origin`, while the REST API sends
+`Access-Control-Allow-Origin: *`. This is not a preference and not something a header can fix; it
+is why the sibling project is REST-only too. Verify before ever reaching for GraphQL again:
 
 ```
-is:open is:pr archived:false author:app/renovate user:<login> org:<org1> org:<org2>
+curl -sD- -o/dev/null -X OPTIONS -H 'Origin: https://example.com' \
+  -H 'Access-Control-Request-Method: POST' https://api.github.com/graphql
 ```
 
-The scope qualifiers are **mandatory** — without at least one, `author:app/renovate` searches all of
-GitHub. Assert this in code.
+The consequence is that the fetch is two-phase, and that anything GraphQL-only is simply
+unavailable — `enablePullRequestAutoMerge` among them, which is why there is no auto-merge action.
+
+1. **`GET /search/issues`**, one page of 50 at a time, per scope. Same query as before:
+
+   ```
+   is:open is:pr archived:false author:app/renovate user:<login> org:<org1> org:<org2>
+   ```
+
+   The scope qualifiers are **mandatory** — without at least one, `author:app/renovate` searches
+   all of GitHub. Assert this in code. Pass `advanced_search=true`; the legacy engine is retired.
+   Search is metered in its own much smaller bucket (30/minute), reported apart from the core
+   quota by reading `x-ratelimit-resource`.
+
+   Search returns the **body**, so a group pull request lists its packages from the first paint —
+   no separate body fetch.
+
+2. **Per pull request**, in batches of six: `GET /repos/{o}/{r}/pulls/{n}` for the head sha,
+   branch names and mergeability, then `GET .../commits/{sha}/check-runs` and
+   `GET .../commits/{sha}/status` for both halves of CI. Rows appear from the search first and
+   fill in as these land, so `detailLoaded` distinguishes "no checks" from "not asked yet".
 
 Traps to remember:
 
-- Do **not** request `body` in the bulk query; Renovate bodies carry full release notes. Fetch them
-  lazily (§5.3 of the brief) and cache parsed results keyed by `prId + updatedAt`.
-- `statusCheckRollup` is null when the head commit has no checks — render "no checks" (grey), not a
-  failure.
-- `mergeable` is computed asynchronously and often returns `UNKNOWN` first; re-query those PRs once
-  after a short delay.
-- `mergeStateStatus` is optional enrichment only (needs the `merge-info-preview` Accept header),
-  never a hard dependency.
-- Search caps at 1000 results and lags reality by seconds. Near the cap, split into one search per
-  owner and merge; warn in the footer if a single owner still exceeds it.
-- Paginate with `after`/`endCursor`, `first: 50`, and render progressively.
-- Report `rateLimit.cost` and `remaining` in the footer.
-
-REST is better where polling is frequent: `304 Not Modified` does not count against the REST rate
-limit and GraphQL has no equivalent, so refresh pending checks over
-`GET /repos/{o}/{r}/commits/{ref}/check-runs` with `If-None-Match`. Cache every ETag.
+- Never re-parse without a body once one has been seen: a detail response that omits it would
+  turn a group pull request back into its title.
+- A commit with no checks is grey, not red.
+- `mergeable` is `null` while GitHub computes it — that is `UNKNOWN`, not a conflict.
+- Search caps at 1000 results. Near the cap, split into one search per owner and merge; warn in
+  the footer if a single owner still exceeds it.
+- REST has no `reviewDecision`. It is derived from `GET .../pulls/{n}/reviews` — latest verdict per
+  reviewer, changes-requested outweighing approvals — and only for a row somebody has opened.
+- Conditional requests everywhere: a `304` does not count against the REST limit, which is what
+  makes polling pending checks every thirty seconds affordable. Cache every ETag.
 
 Bot logins that count as Renovate, configurable with these defaults: `renovate[bot]` (hosted Mend
 app, `author:app/renovate` in query syntax), `renovate-bot`, `renovate`. `dependabot[bot]` sits
@@ -146,14 +161,15 @@ does not expect: degrade to `unknown`, never crash and never group wrongly.
 Off unless the write toggle is on. Every destructive or bulk action goes through a confirmation
 dialog naming exactly what will happen and to how many PRs.
 
-Per PR: merge (`PUT …/pulls/{n}/merge`, configurable method with a per-repo override), enable
-auto-merge (GraphQL `enablePullRequestAutoMerge`), approve (`POST …/reviews`, `event: APPROVE`),
+Per PR: merge (`PUT …/pulls/{n}/merge`, configurable method with a per-repo override, remembered
+after a `405`), approve (`POST …/reviews`, `event: APPROVE`),
 request a Renovate rebase (flip `- [ ]` to `- [x]` on the line carrying the `<!-- rebase-check -->`
 comment — match on the comment, not the human-readable text — then `PATCH` the PR), close (warn that
 Renovate reads a closed PR as "ignore this update"), and re-run failed jobs when the Actions write
 permission is present.
 
-Bulk actions run **sequentially** with a visible progress list and per-PR results, stop the queue on
+There is no auto-merge action: it is GraphQL-only, and GraphQL is unreachable. Bulk actions run
+**sequentially** with a visible progress list and per-PR results, stop the queue on
 repeated failures, and back off on `403`/`429` with `retry-after`. After any write, refresh only the
 affected PRs.
 

@@ -1,22 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GitHubClient, asHttpError, describeError } from '../src/lib/githubClient';
 
-const { requestMock, graphqlMock, constructorMock } = vi.hoisted(() => ({
+const { requestMock, constructorMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
-  graphqlMock: vi.fn(),
   constructorMock: vi.fn(),
 }));
 
 vi.mock('@octokit/rest', () => ({
   Octokit: class FakeOctokit {
     public readonly request = requestMock;
-    public readonly graphql = graphqlMock;
 
     public constructor(options: unknown) {
       constructorMock(options);
     }
   },
 }));
+
+const NO_OWNER: string | undefined = undefined;
 
 const RATE_HEADERS = {
   'x-ratelimit-limit': '5000',
@@ -55,7 +55,6 @@ class HttpError extends Error {
 
 beforeEach(() => {
   requestMock.mockReset();
-  graphqlMock.mockReset();
   constructorMock.mockReset();
 });
 
@@ -312,6 +311,20 @@ describe('GitHubClient', () => {
       expect(new GitHubClient('t').rateLimit).toBeUndefined();
     });
 
+    it('keeps the search quota apart from the core one', async() => {
+      const client = new GitHubClient('t');
+      requestMock.mockResolvedValue(response({ items: []}, {
+        'x-ratelimit-resource': 'search',
+        'x-ratelimit-limit': '30',
+        'x-ratelimit-remaining': '28',
+        'x-ratelimit-reset': '1700000001',
+      }));
+      await client.searchPrs('q', 1, 50, NO_OWNER);
+      expect(client.searchRateLimit).toEqual({ limit: 30, remaining: 28, reset: 1_700_000_001 });
+      // The core quota is untouched by a search.
+      expect(client.rateLimit).toBeUndefined();
+    });
+
     it('records the quota reported by a response', async() => {
       requestMock.mockResolvedValue(response({ login: 'a', name: null, avatar_url: 'a.png' }));
       const client = new GitHubClient('t');
@@ -334,44 +347,58 @@ describe('GitHubClient', () => {
     });
   });
 
-  describe('graphql', () => {
-    const QUOTA = { limit: 5000, cost: 3, remaining: 4997, resetAt: '2026-08-17T18:00:00Z' };
-
-    it('runs the query and returns its data', async() => {
-      graphqlMock.mockResolvedValue({ search: { issueCount: 2 }});
-      const client = new GitHubClient('t');
-      await expect(client.graphql('query {}', { q: 'x' })).resolves.toEqual({ search: { issueCount: 2 }});
-      expect(graphqlMock).toHaveBeenCalledWith('query {}', { q: 'x' });
+  describe('searchPrs', () => {
+    it('asks the search endpoint for one page, with the newer query engine', async() => {
+      requestMock.mockResolvedValue(response({ total_count: 3, items: []}));
+      await new GitHubClient('t').searchPrs('is:open is:pr user:me', 2, 50, NO_OWNER);
+      expect(requestMock).toHaveBeenCalledWith('GET /search/issues', containing({
+        q: 'is:open is:pr user:me',
+        page: 2,
+        per_page: 50,
+        advanced_search: 'true',
+      }));
     });
 
-    it('records the quota the response reports', async() => {
-      graphqlMock.mockResolvedValue({ rateLimit: QUOTA });
-      const client = new GitHubClient('t');
-      expect(client.graphqlRateLimit).toBeUndefined();
-      await client.graphql('query {}', {});
-      expect(client.graphqlRateLimit).toEqual(QUOTA);
-    });
-
-    it('keeps the last known quota when a response carries none', async() => {
-      graphqlMock.mockResolvedValueOnce({ rateLimit: QUOTA }).mockResolvedValueOnce({ rateLimit: null });
-      const client = new GitHubClient('t');
-      await client.graphql('query {}', {});
-      await client.graphql('query {}', {});
-      expect(client.graphqlRateLimit).toEqual(QUOTA);
-    });
-
-    it('uses an organisation token when the query is about that organisation', async() => {
-      graphqlMock.mockResolvedValue({});
+    it('uses an organisation token when the search is about that organisation', async() => {
+      requestMock.mockResolvedValue(response({ items: []}));
       const client = new GitHubClient('main', [{ owner: 'comunica', token: 'org' }]);
-      await client.graphql('query {}', {}, 'Comunica');
-      // Two Octokit instances exist; the organisation one answered.
+      await client.searchPrs('org:comunica', 1, 50, 'Comunica');
       expect(constructorMock).toHaveBeenCalledTimes(2);
-      expect(graphqlMock).toHaveBeenCalledTimes(1);
     });
+  });
 
-    it('does not swallow a failed query', async() => {
-      graphqlMock.mockRejectedValue(new Error('bad query'));
-      await expect(new GitHubClient('t').graphql('query {}', {})).rejects.toThrow('bad query');
+  describe('getPr', () => {
+    it('reads one pull request', async() => {
+      requestMock.mockResolvedValue(response({ number: 7 }));
+      await expect(new GitHubClient('t').getPr('o', 'r', 7)).resolves.toEqual({ number: 7 });
+      expect(requestMock).toHaveBeenCalledWith(
+        'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+        containing({ owner: 'o', repo: 'r', pull_number: 7 }),
+      );
+    });
+  });
+
+  describe('getCombinedStatus', () => {
+    it('reads the combined commit status', async() => {
+      requestMock.mockResolvedValue(response({ state: 'success', statuses: []}));
+      await expect(new GitHubClient('t').getCombinedStatus('o', 'r', 'sha'))
+        .resolves.toEqual({ state: 'success', statuses: []});
+      expect(requestMock).toHaveBeenCalledWith(
+        'GET /repos/{owner}/{repo}/commits/{ref}/status',
+        containing({ ref: 'sha' }),
+      );
+    });
+  });
+
+  describe('getReviews', () => {
+    it('reads the reviews of a pull request', async() => {
+      requestMock.mockResolvedValue(response([{ state: 'APPROVED' }]));
+      await expect(new GitHubClient('t').getReviews('o', 'r', 7))
+        .resolves.toEqual([{ state: 'APPROVED' }]);
+      expect(requestMock).toHaveBeenCalledWith(
+        'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews',
+        containing({ pull_number: 7 }),
+      );
     });
   });
 

@@ -1,16 +1,24 @@
+import type {
+  IApiCheckRun,
+  IApiPullRequest,
+  IApiReview,
+  IApiSearchItem,
+  ICombinedStatus,
+} from './githubClient';
+import { captured } from './renovate/capture';
 import { resolveUpdates } from './renovate/resolve';
 import type {
   CheckState,
-  IGraphqlRateLimit,
   IOwnerToken,
   IPrCheck,
   IRenovatePr,
   IRenovateResolution,
   ISettings,
-  Mergeable,
   ReviewDecision,
 } from './types';
 import { DEFAULT_RENOVATE_AUTHORS, DEPENDABOT_AUTHOR } from './types';
+
+export type { IApiPullRequest, IApiReview, IApiSearchItem, ICombinedStatus, ISearchResponse } from './githubClient';
 
 /**
  * How many results one page of the search asks for. GitHub caps `first` at 100, but every node
@@ -193,99 +201,22 @@ export const SEARCH_QUERY = `query($q: String!, $first: Int!, $after: String) {
 }`;
 
 /**
- * Fetches pull request bodies on demand.
- *
- * Deliberately kept out of the bulk query: a Renovate body carries entire release-note sections,
- * so asking for hundreds of them up front is a very slow first paint for information almost none
- * of the rows need.
- */
-export const BODIES_QUERY = `query($ids: [ID!]!) {
-  rateLimit { limit cost remaining resetAt }
-  nodes(ids: $ids) {
-    ... on PullRequest { id body }
-  }
-}`;
-
-/**
- * Re-asks for the mergeability of pull requests GitHub had not computed yet.
- */
-export const MERGEABLE_QUERY = `query($ids: [ID!]!) {
-  rateLimit { limit cost remaining resetAt }
-  nodes(ids: $ids) {
-    ... on PullRequest { id mergeable }
-  }
-}`;
-
-export interface IApiRollupContext {
-  name?: string;
-  status?: string | null;
-  conclusion?: string | null;
-  detailsUrl?: string | null;
-  context?: string;
-  state?: string | null;
-  targetUrl?: string | null;
-}
-
-export interface IApiNode {
-  id?: string;
-  number?: number;
-  title?: string;
-  url?: string;
-  headRefName?: string;
-  baseRefName?: string;
-  headRefOid?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  isDraft?: boolean;
-  mergeable?: string | null;
-  reviewDecision?: string | null;
-  author?: { login?: string } | null;
-  labels?: { nodes?: ({ name?: string } | null)[] | null } | null;
-  repository?: {
-    nameWithOwner?: string;
-    isPrivate?: boolean;
-    viewerPermission?: string | null;
-    owner?: { login?: string } | null;
-  } | null;
-  commits?: {
-    nodes?: ({
-      commit?: {
-        oid?: string;
-        statusCheckRollup?: {
-          state?: string | null;
-          contexts?: { totalCount?: number; nodes?: (IApiRollupContext | null)[] | null } | null;
-        } | null;
-      } | null;
-    } | null)[] | null;
-  } | null;
-}
-
-export interface ISearchPage {
-  rateLimit: IGraphqlRateLimit | undefined;
-  search?: {
-    issueCount?: number;
-    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
-    nodes?: (IApiNode | null)[] | null;
-  } | null;
-}
-
-/**
- * Maps a check run's status/conclusion pair onto the one state the row is coloured by.
+ * Maps a check run's status/conclusion pair onto the one state a row is coloured by.
  * @param status The `status` field of a check run.
  * @param conclusion The `conclusion` field of a check run.
  */
 export function checkRunState(status: string | null | undefined, conclusion: string | null | undefined): CheckState {
-  if (status !== 'COMPLETED') {
+  if ((status ?? '').toLowerCase() !== 'completed') {
     return 'pending';
   }
-  switch (conclusion) {
-    case 'SUCCESS':
+  switch ((conclusion ?? '').toLowerCase()) {
+    case 'success':
       return 'success';
-    case 'FAILURE':
-    case 'TIMED_OUT':
-    case 'STARTUP_FAILURE':
+    case 'failure':
+    case 'timed_out':
+    case 'startup_failure':
       return 'failure';
-    case 'ACTION_REQUIRED':
+    case 'action_required':
       return 'error';
     // A cancelled, skipped, neutral or stale check says nothing about the code, so it is not a
     // failure — it just is not a success either.
@@ -295,8 +226,8 @@ export function checkRunState(status: string | null | undefined, conclusion: str
 }
 
 /**
- * Maps a commit status context's state onto a check state.
- * @param state The `state` field of a status context or a rollup.
+ * Maps a commit status state onto a check state.
+ * @param state The `state` field of a status context.
  */
 export function statusContextState(state: string | null | undefined): CheckState {
   switch (state) {
@@ -314,99 +245,171 @@ export function statusContextState(state: string | null | undefined): CheckState
   }
 }
 
-function toChecks(contexts: (IApiRollupContext | null)[]): IPrCheck[] {
-  const checks: IPrCheck[] = [];
-  for (const context of contexts) {
-    if (context === null) {
-      continue;
-    }
-    if (typeof context.name === 'string') {
-      checks.push({
-        name: context.name,
-        state: checkRunState(context.status, context.conclusion),
-        url: context.detailsUrl ?? undefined,
-      });
-    } else if (typeof context.context === 'string') {
-      checks.push({
-        name: context.context,
-        state: statusContextState(context.state),
-        url: context.targetUrl ?? undefined,
-      });
-    }
-  }
-  return checks;
-}
-
-function toMergeable(value: string | null | undefined): Mergeable {
-  return value === 'MERGEABLE' || value === 'CONFLICTING' ? value : 'UNKNOWN';
-}
-
-function toReviewDecision(value: string | null | undefined): ReviewDecision {
-  return value === 'APPROVED' || value === 'CHANGES_REQUESTED' || value === 'REVIEW_REQUIRED' ?
-    value :
-    null;
-}
-
 /**
- * Turns one search result node into a dashboard pull request.
+ * Turns one search result into a pull request.
  *
- * Every field is treated as possibly absent. A search that spans many repositories will meet ones
- * the token can only partly see, and one missing field must cost one pull request at most.
- * @param node A `PullRequest` node from the search query.
+ * The search endpoint carries no head commit, no branch names and no mergeability, so what comes
+ * out here is deliberately half a pull request: enough to draw a row immediately, with the rest
+ * filled in by {@link applyDetail} a moment later.
+ * @param item One item of a `GET /search/issues` response.
  */
-export function normalizePr(node: IApiNode | null): IRenovatePr | undefined {
-  if (node === null || typeof node.id !== 'string' || typeof node.number !== 'number') {
+export function normalizeSearchItem(item: IApiSearchItem | null): IRenovatePr | undefined {
+  if (item === null || typeof item.number !== 'number' || item.pull_request === undefined ||
+    item.pull_request === null) {
     return undefined;
   }
-  const repo = node.repository?.nameWithOwner;
-  if (typeof repo !== 'string') {
+  const repo = repoFromUrl(item.repository_url);
+  if (repo === undefined) {
     return undefined;
   }
 
-  const commit = node.commits?.nodes?.[0]?.commit;
-  const rollup = commit?.statusCheckRollup;
-  const checks = toChecks(rollup?.contexts?.nodes ?? []);
-  // A null rollup means the head commit has no checks at all, which is grey rather than red. When
-  // there is a rollup, its own state is authoritative: the contexts are capped at 30, so counting
-  // only those would call a repository with 40 checks green while one of the other 10 is failing.
-  const checkState: CheckState = rollup === null || rollup === undefined ?
-    'none' :
-    statusContextState(rollup.state);
-
-  const permission = node.repository?.viewerPermission;
   const pr: IRenovatePr = {
-    id: node.id,
+    // Search has no node id, and `owner/repo#number` is just as stable and rather more readable.
+    id: `${repo}#${item.number}`,
     repo,
-    owner: node.repository?.owner?.login ?? repo.slice(0, Math.max(0, repo.indexOf('/'))),
-    number: node.number,
-    title: node.title ?? '',
-    url: node.url ?? '',
-    branch: node.headRefName ?? '',
-    baseBranch: node.baseRefName ?? '',
-    author: node.author?.login ?? '',
-    createdAt: node.createdAt ?? '',
-    updatedAt: node.updatedAt ?? node.createdAt ?? '',
-    isDraft: node.isDraft === true,
-    isPrivate: node.repository?.isPrivate === true,
-    labels: (node.labels?.nodes ?? [])
+    owner: repo.slice(0, Math.max(0, repo.indexOf('/'))),
+    number: item.number,
+    title: item.title ?? '',
+    url: item.html_url ?? '',
+    branch: '',
+    baseBranch: '',
+    author: item.user?.login ?? '',
+    createdAt: item.created_at ?? '',
+    updatedAt: item.updated_at ?? item.created_at ?? '',
+    isDraft: item.draft === true,
+    isPrivate: false,
+    labels: (item.labels ?? [])
       .map(label => label?.name)
       .filter((name): name is string => typeof name === 'string'),
-    mergeable: toMergeable(node.mergeable),
-    reviewDecision: toReviewDecision(node.reviewDecision),
-    viewerCanMerge: permission === 'ADMIN' || permission === 'MAINTAIN' || permission === 'WRITE',
-    checkState,
-    checks,
-    headSha: commit?.oid ?? node.headRefOid ?? '',
-    // Resolved from the title and branch alone for now; the body is folded in if and when it is
-    // fetched, which is what turns a group pull request from a name into a list of packages.
+    mergeable: 'UNKNOWN',
+    reviewDecision: null,
+    // Nothing says otherwise yet, and hiding a pull request the viewer might well be able to
+    // merge is worse than showing one they cannot.
+    viewerCanMerge: true,
+    checkState: 'none',
+    checks: [],
+    headSha: '',
+    detailLoaded: false,
     parse: EMPTY_PARSE,
     bodyLoaded: false,
   };
-  return { ...pr, parse: resolveUpdates(pr) };
+  // Search returns the body, so a group pull request lists its packages from the very first
+  // paint rather than waiting for a fetch of its own.
+  const body = typeof item.body === 'string' ? item.body : undefined;
+  return { ...pr, parse: resolveUpdates(pr, body), bodyLoaded: body !== undefined };
 }
 
 /**
- * The placeholder a pull request carries while its own parse is being computed from it.
+ * `https://api.github.com/repos/owner/name` -> `owner/name`.
+ * @param url A repository API URL.
+ */
+export function repoFromUrl(url: string | undefined): string | undefined {
+  if (url === undefined) {
+    return undefined;
+  }
+  const match = /\/repos\/([^/]+\/[^/]+)$/u.exec(url);
+  return match === null ? undefined : captured(match, 1);
+}
+
+/**
+ * Folds the per-pull-request detail into a row drawn from the search.
+ * @param pr A pull request.
+ * @param detail Its `GET /repos/{owner}/{repo}/pulls/{number}` response.
+ */
+export function applyDetail(pr: IRenovatePr, detail: IApiPullRequest): IRenovatePr {
+  const permissions = detail.base?.repo?.permissions;
+  const next: IRenovatePr = {
+    ...pr,
+    branch: detail.head?.ref ?? pr.branch,
+    baseBranch: detail.base?.ref ?? pr.baseBranch,
+    headSha: detail.head?.sha ?? pr.headSha,
+    isDraft: detail.draft ?? pr.isDraft,
+    isPrivate: detail.base?.repo?.private === true,
+    // REST reports a boolean, and null while GitHub is still working it out.
+    mergeable: detail.mergeable === true ? 'MERGEABLE' : (detail.mergeable === false ? 'CONFLICTING' : 'UNKNOWN'),
+    viewerCanMerge: permissions === undefined || permissions === null ?
+      pr.viewerCanMerge :
+      permissions.push === true || permissions.maintain === true || permissions.admin === true,
+    updatedAt: detail.updated_at ?? pr.updatedAt,
+    detailLoaded: true,
+  };
+  const body = typeof detail.body === 'string' ? detail.body : undefined;
+  if (body !== undefined) {
+    // The branch is known now too, which can change what the parsers make of it.
+    return { ...next, parse: resolveUpdates(next, body), bodyLoaded: true };
+  }
+  // No body here. Re-parsing without one would throw away a body the search already handed over,
+  // turning a group pull request back into its title, so that parse is kept as it is.
+  return next.bodyLoaded ? next : { ...next, parse: resolveUpdates(next) };
+}
+
+/**
+ * Folds check runs and commit statuses into a row.
+ *
+ * Both halves of CI matter: Actions reports check runs, while everything older reports commit
+ * statuses, and a repository can use either or both.
+ * @param pr A pull request.
+ * @param runs Its check runs.
+ * @param status Its combined commit status, when one was fetched.
+ */
+export function applyChecks(
+  pr: IRenovatePr,
+  runs: IApiCheckRun[],
+  status: ICombinedStatus | undefined,
+): IRenovatePr {
+  const checks: IPrCheck[] = runs.map(run => ({
+    name: run.name,
+    state: checkRunState(run.status, run.conclusion),
+    url: run.details_url ?? undefined,
+  }));
+  for (const context of status?.statuses ?? []) {
+    if (context !== null && typeof context.context === 'string') {
+      checks.push({
+        name: context.context,
+        state: statusContextState((context.state ?? '').toUpperCase()),
+        url: context.target_url ?? undefined,
+      });
+    }
+  }
+  return { ...pr, checks, checkState: worstCheckState(checks) };
+}
+
+/**
+ * Reads a review decision out of a pull request's reviews.
+ *
+ * REST has no equivalent of GraphQL's `reviewDecision`, so it is derived the way GitHub does:
+ * only each reviewer's most recent verdict counts, and a request for changes outweighs an
+ * approval however many approvals there are.
+ * @param reviews The reviews of a pull request, oldest first.
+ */
+export function reviewDecisionFrom(reviews: IApiReview[]): ReviewDecision {
+  const latest = new Map<string, string>();
+  for (const review of reviews) {
+    const login = review.user?.login;
+    const state = review.state;
+    // COMMENTED and PENDING are not verdicts, and must not displace one.
+    if (login !== undefined && (state === 'APPROVED' || state === 'CHANGES_REQUESTED' || state === 'DISMISSED')) {
+      latest.set(login, state);
+    }
+  }
+  const verdicts = new Set(latest.values());
+  if (verdicts.has('CHANGES_REQUESTED')) {
+    return 'CHANGES_REQUESTED';
+  }
+  return verdicts.has('APPROVED') ? 'APPROVED' : null;
+}
+
+/**
+ * Rolls a set of check states up into the worst one present.
+ * @param checks Some checks.
+ */
+export function worstCheckState(checks: IPrCheck[]): CheckState {
+  const order: CheckState[] = [ 'failure', 'error', 'pending', 'success' ];
+  return order.find(state => checks.some(check => check.state === state)) ?? 'none';
+}
+
+/**
+ * The parse a pull request carries before anything has been read out of it.
  */
 const EMPTY_PARSE: IRenovateResolution = {
   updates: [],
@@ -416,16 +419,6 @@ const EMPTY_PARSE: IRenovateResolution = {
   source: 'unknown',
   disagreements: [],
 };
-
-/**
- * Turns a raw search page into pull requests, dropping anything unrecognisable.
- * @param page One page of search results.
- */
-export function normalizePage(page: ISearchPage): IRenovatePr[] {
-  return (page.search?.nodes ?? [])
-    .map(node => normalizePr(node ?? null))
-    .filter((pr): pr is IRenovatePr => pr !== undefined);
-}
 
 /**
  * Merges pull requests from several searches, keeping the newest copy of each.

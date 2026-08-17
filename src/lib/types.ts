@@ -57,11 +57,10 @@ export const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
 /**
  * A write the dashboard can perform on a pull request.
  */
-export type ActionKind = 'approve' | 'auto-merge' | 'close' | 'merge' | 'rebase' | 'rerun';
+export type ActionKind = 'approve' | 'close' | 'merge' | 'rebase' | 'rerun';
 
 export const ACTION_LABELS: Record<ActionKind, string> = {
   merge: 'Merge',
-  'auto-merge': 'Enable auto-merge',
   approve: 'Approve',
   rebase: 'Ask Renovate to rebase',
   close: 'Close',
@@ -72,7 +71,7 @@ export const ACTION_LABELS: Record<ActionKind, string> = {
  * Actions that can be run over a selection. Closing is deliberately absent: Renovate reads a
  * closed pull request as "never offer this update again", which is too big a thing to do in bulk.
  */
-export const BULK_ACTIONS: ActionKind[] = [ 'merge', 'auto-merge', 'approve', 'rebase' ];
+export const BULK_ACTIONS: ActionKind[] = [ 'merge', 'approve', 'rebase' ];
 
 export type ActionOutcome = 'failed' | 'pending' | 'running' | 'skipped' | 'succeeded';
 
@@ -199,6 +198,14 @@ export interface IRenovatePr {
   checks: IPrCheck[];
   headSha: string;
   /**
+   * Whether the per-pull-request detail and checks have been fetched.
+   *
+   * The search endpoint carries neither the head commit nor the mergeability, so a row appears
+   * from the search alone and fills in a moment later. Until then its colour means "not known
+   * yet" rather than "no checks".
+   */
+  detailLoaded: boolean;
+  /**
    * What the parser made of the title, branch and — once loaded — the body. Kept apart from the
    * raw GitHub fields above so the parser stays testable without an API shape in sight.
    */
@@ -208,20 +215,6 @@ export interface IRenovatePr {
    * only fetched when something actually needs them.
    */
   bodyLoaded: boolean;
-}
-
-/**
- * The GraphQL quota, which is counted in points rather than requests and is therefore reported
- * separately from the REST one.
- */
-export interface IGraphqlRateLimit {
-  limit: number;
-  cost: number;
-  remaining: number;
-  /**
-   * ISO 8601 timestamp at which the quota resets.
-   */
-  resetAt: string;
 }
 
 /**
@@ -259,11 +252,14 @@ export interface IDashboardState {
    * The action currently running, or the last one that ran.
    */
   actionRun: IActionRun | undefined;
-  rateLimit: IGraphqlRateLimit | undefined;
   /**
-   * The REST quota, which the conditional check-run polling spends and which `304` answers do not.
+   * The core REST quota. Conditional requests answered with `304` do not spend it.
    */
-  restRateLimit: IRateLimit | undefined;
+  rateLimit: IRateLimit | undefined;
+  /**
+   * The search quota, which GitHub meters separately and far more tightly.
+   */
+  searchRateLimit: IRateLimit | undefined;
   /**
    * Whether polling is suspended because the tab is hidden.
    */

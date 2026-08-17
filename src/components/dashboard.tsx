@@ -104,14 +104,6 @@ export function Dashboard({ store, settings }: IDashboardProps) {
     return () => clearInterval(timer);
   }, []);
 
-  // Grouping by dependency is the one view that cannot be built from titles alone: a group pull
-  // request only lists its packages in its body.
-  useEffect(() => {
-    if (view.group === 'dependency') {
-      void store.loadBodies(state.prs.filter(pr => !pr.bodyLoaded).map(pr => pr.id));
-    }
-  }, [ view.group, state.prs, store ]);
-
   const visible = useMemo(() => sortPrs(filterPrs(state.prs, view.filters), view.sort), [
     state.prs,
     view.filters,
@@ -132,8 +124,10 @@ export function Dashboard({ store, settings }: IDashboardProps) {
     }));
   }
 
+  // A review decision costs a request of its own on REST, so it is only fetched for a row
+  // somebody has actually opened.
   function expand(id: string): void {
-    void store.loadBodies([ id ]);
+    void store.loadReviewDecision(id);
   }
 
   const selected = new Set(state.selected);

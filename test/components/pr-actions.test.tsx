@@ -53,7 +53,7 @@ describe('PrActions', () => {
   it('asks for the action rather than performing it', () => {
     const onAction = renderActions();
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(onAction).toHaveBeenCalledWith('approve', expect.objectContaining({ id: 'PR_1' }));
+    expect(onAction).toHaveBeenCalledWith('approve', expect.objectContaining({ id: 'rubensworks/jbr.js#42' }));
   });
 
   it('marks closing as the destructive one', () => {

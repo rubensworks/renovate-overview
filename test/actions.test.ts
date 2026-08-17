@@ -1,7 +1,6 @@
 import type { Mock } from 'vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  AUTO_MERGE_MUTATION,
   NothingToDoError,
   backoffFor,
   checkRebaseBox,
@@ -35,7 +34,6 @@ interface IStubClient {
   getPrBody: Mock<() => Promise<string>>;
   setPrBody: Mock<() => Promise<void>>;
   rerunFailedJobs: Mock<() => Promise<void>>;
-  graphql: Mock<() => Promise<unknown>>;
 }
 
 function stubClient(): IStubClient {
@@ -46,7 +44,6 @@ function stubClient(): IStubClient {
     getPrBody: vi.fn(async() => ''),
     setPrBody: vi.fn(async() => {}),
     rerunFailedJobs: vi.fn(async() => {}),
-    graphql: vi.fn(async() => ({})),
   };
 }
 
@@ -133,7 +130,7 @@ describe('mergeMethodFor', () => {
 describe('isActionAvailable', () => {
   it('does not offer to merge something that cannot be merged', () => {
     expect(isActionAvailable('merge', pr({ mergeable: 'CONFLICTING' }))).toBe(false);
-    expect(isActionAvailable('auto-merge', pr({ isDraft: true }))).toBe(false);
+    expect(isActionAvailable('merge', pr({ isDraft: true }))).toBe(false);
     expect(isActionAvailable('merge', pr())).toBe(true);
   });
 
@@ -165,15 +162,6 @@ describe('runAction', () => {
     const settings = { ...SETTINGS, repoMergeMethods: { 'rubensworks/jbr.js': <const> 'merge' }};
     await runAction(asClient(), 'merge', pr(), settings);
     expect(client.mergePr).toHaveBeenCalledWith('rubensworks', 'jbr.js', 42, 'merge');
-  });
-
-  it('enables auto-merge over GraphQL, which has no REST equivalent', async() => {
-    await runAction(asClient(), 'auto-merge', pr(), SETTINGS);
-    expect(client.graphql).toHaveBeenCalledWith(
-      AUTO_MERGE_MUTATION,
-      { id: 'PR_1', method: 'SQUASH' },
-      'rubensworks',
-    );
   });
 
   it('approves and closes', async() => {

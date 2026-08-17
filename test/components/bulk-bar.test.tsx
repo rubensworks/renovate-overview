@@ -41,7 +41,6 @@ describe('BulkBar', () => {
   it('offers the bulk actions, but not closing', () => {
     renderBar();
     expect(screen.getByRole('button', { name: 'Merge selected' })).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Enable auto-merge selected' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Approve selected' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Ask Renovate to rebase selected' })).toBeDefined();
     expect(screen.queryByRole('button', { name: /Close/u })).toBeNull();

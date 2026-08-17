@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAbsolute, formatRelative, formatUntil } from '../src/lib/time';
+import { formatAbsolute, formatRelative, formatUntil, formatUntilUnix } from '../src/lib/time';
 
 const NOW = Date.parse('2026-08-17T12:00:00Z');
 
@@ -37,6 +37,21 @@ describe('formatAbsolute', () => {
 
   it('gives up visibly on a timestamp it cannot read', () => {
     expect(formatAbsolute('nope')).toBe('—');
+  });
+});
+
+describe('formatUntilUnix', () => {
+  it('counts down in seconds and then in minutes', () => {
+    expect(formatUntilUnix((NOW / 1000) + 30, NOW)).toBe('30s');
+    expect(formatUntilUnix((NOW / 1000) + 2040, NOW)).toBe('34m');
+  });
+
+  it('never counts below zero', () => {
+    expect(formatUntilUnix((NOW / 1000) - 3600, NOW)).toBe('0s');
+  });
+
+  it('gives up visibly on a timestamp it cannot read', () => {
+    expect(formatUntilUnix(Number.NaN, NOW)).toBe('—');
   });
 });
 
