@@ -8,7 +8,7 @@ export interface IPrActionsProps {
   onAction: (kind: ActionKind, pr: IRenovatePr) => void;
 }
 
-const ORDER: ActionKind[] = [ 'merge', 'auto-merge', 'approve', 'rebase', 'rerun', 'close' ];
+const ORDER: ActionKind[] = [ 'merge', 'approve', 'rebase', 'rerun', 'close' ];
 
 /**
  * The per-pull-request actions, shown inside an expanded row.

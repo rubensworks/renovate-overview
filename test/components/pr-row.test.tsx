@@ -155,11 +155,11 @@ describe('PrRow', () => {
     expect(screen.queryByText('Branch')).toBeNull();
   });
 
-  it('asks for the body the first time it is opened, and not again', () => {
+  it('asks for what an open row needs, each time it is opened', () => {
     const onExpand = vi.fn();
     renderRow({}, { onExpand });
     expand();
-    expect(onExpand).toHaveBeenCalledWith('PR_1');
+    expect(onExpand).toHaveBeenCalledWith('rubensworks/jbr.js#42');
     fireEvent.click(screen.getByRole('button', { name: /Collapse/u }));
     fireEvent.click(screen.getByRole('button', { name: /Expand/u }));
     expect(onExpand).toHaveBeenCalledTimes(2);

@@ -38,6 +38,21 @@ export function formatAbsolute(iso: string): string {
 }
 
 /**
+ * Formats the time until a Unix timestamp as a short `12m` style string.
+ *
+ * REST reports its reset as Unix seconds, unlike the ISO timestamps everything else uses.
+ * @param unixSeconds A Unix timestamp in seconds.
+ * @param now The current time in milliseconds.
+ */
+export function formatUntilUnix(unixSeconds: number, now: number = Date.now()): string {
+  if (!Number.isFinite(unixSeconds)) {
+    return '—';
+  }
+  const delta = Math.max(0, (unixSeconds * 1000) - now);
+  return delta < MINUTE ? `${Math.ceil(delta / 1000)}s` : `${Math.ceil(delta / MINUTE)}m`;
+}
+
+/**
  * Formats the time until an ISO timestamp as a short `12m` style string.
  * @param iso An ISO 8601 timestamp.
  * @param now The current time in milliseconds.

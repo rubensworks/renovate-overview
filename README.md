@@ -87,6 +87,8 @@ grant only what you intend to use:
 - **Actions: Read and write** — only needed for "re-run failed jobs". Without it that button
   simply is not offered.
 
+There is no "enable auto-merge": GitHub only offers it over GraphQL, which a browser cannot reach.
+
 Every write goes through a confirmation naming exactly what it will do and to how many pull
 requests, and bulk actions run one at a time with a per-pull-request result list. A repository that
 forbids your merge method answers with a 405, which is reported against that pull request rather
@@ -131,11 +133,12 @@ the title carries the count — `(3✕) Renovate Overview` when three are failin
 
 ## Rate limits
 
-The dashboard uses one GraphQL search to fetch the PRs *and* their check rollups together, rather
-than walking repositories one by one, and refreshes pending checks over REST with conditional
-requests — a `304 Not Modified` costs nothing against the REST limit. Remaining REST and GraphQL
-quota is shown in the footer; polling slows down as quota drains and stops before it hits zero,
-saying so rather than silently freezing.
+Everything goes over the REST API, because **GitHub's GraphQL endpoint does not support CORS** and
+so cannot be called from a browser at all. One search finds the pull requests, then each one is
+filled in from its own detail and checks, in small batches, with conditional requests throughout —
+a `304 Not Modified` costs nothing against the rate limit, which is what makes polling affordable.
+Remaining core and search quota are both shown in the footer; polling slows down as quota drains
+and stops before it hits zero, saying so rather than silently freezing.
 
 ## Contributing
 

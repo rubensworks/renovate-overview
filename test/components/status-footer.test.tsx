@@ -57,24 +57,23 @@ describe('StatusFooter', () => {
     expect(screen.getByText('1 open')).toBeDefined();
   });
 
-  it('reports the REST quota beside the GraphQL one, once anything has spent it', () => {
+  it('reports the search quota beside the core one, since GitHub meters them apart', () => {
     const container = renderFooter({
-      rateLimit: { limit: 5000, cost: 1, remaining: 4000, resetAt: '2026-08-17T12:30:00Z' },
-      restRateLimit: { limit: 5000, remaining: 4321, reset: 0 },
+      rateLimit: { limit: 5000, remaining: 4000, reset: 0 },
+      searchRateLimit: { limit: 30, remaining: 28, reset: 0 },
     });
-    expect(container.textContent).toContain('4321/5000 REST');
+    expect(container.textContent).toContain('28/30 searches');
   });
 
   it('says nothing about the quota until one is reported', () => {
-    expect(renderFooter().textContent).toContain('GraphQL quota unknown');
+    expect(renderFooter().textContent).toContain('API quota unknown');
   });
 
-  it('reports the quota, the cost of the last query, and when it resets', () => {
+  it('reports the quota and when it resets', () => {
     const container = renderFooter({
-      rateLimit: { limit: 5000, cost: 3, remaining: 4000, resetAt: '2026-08-17T12:30:00Z' },
+      rateLimit: { limit: 5000, remaining: 4000, reset: (NOW / 1000) + 1800 },
     });
-    expect(container.textContent).toContain('4000/5000 GraphQL points');
-    expect(container.textContent).toContain('last query cost 3');
+    expect(container.textContent).toContain('4000/5000 API calls left');
     expect(container.textContent).toContain('resets in 30m');
   });
 
@@ -83,16 +82,12 @@ describe('StatusFooter', () => {
     [ 1000, 'warn' ],
     [ 100, 'low' ],
   ])('colours a quota of %d as %s', (remaining, level) => {
-    const container = renderFooter({
-      rateLimit: { limit: 5000, cost: 1, remaining, resetAt: '2026-08-17T12:30:00Z' },
-    });
+    const container = renderFooter({ rateLimit: { limit: 5000, remaining, reset: 0 }});
     expect(container.querySelector(`.status__quota--${level}`)).not.toBeNull();
   });
 
   it('keeps the quota bar visible even when the quota is spent', () => {
-    const container = renderFooter({
-      rateLimit: { limit: 5000, cost: 1, remaining: 0, resetAt: '2026-08-17T12:30:00Z' },
-    });
+    const container = renderFooter({ rateLimit: { limit: 5000, remaining: 0, reset: 0 }});
     expect(container.querySelector('.status__quota-fill')?.getAttribute('style')).toContain('width: 2%');
   });
 

@@ -1,5 +1,5 @@
 import { Octokit } from '@octokit/rest';
-import type { IGraphqlRateLimit, IOwnerToken, IRateLimit, IViewer, MergeMethod } from './types';
+import type { IOwnerToken, IRateLimit, IViewer, MergeMethod } from './types';
 
 const API_VERSION = '2022-11-28';
 const USER_AGENT = 'renovate-overview';
@@ -25,6 +25,52 @@ export interface IApiCheckRun {
 
 interface IApiCheckRuns {
   check_runs?: IApiCheckRun[];
+}
+
+export interface IApiSearchItem {
+  number?: number;
+  title?: string;
+  html_url?: string;
+  state?: string;
+  draft?: boolean;
+  body?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  user?: { login?: string } | null;
+  labels?: ({ name?: string } | null)[] | null;
+  repository_url?: string;
+  pull_request?: { url?: string } | null;
+}
+
+export interface ISearchResponse {
+  total_count?: number;
+  incomplete_results?: boolean;
+  items?: (IApiSearchItem | null)[] | null;
+}
+
+export interface IApiPullRequest {
+  number?: number;
+  state?: string;
+  body?: string | null;
+  draft?: boolean;
+  mergeable?: boolean | null;
+  updated_at?: string;
+  head?: { ref?: string; sha?: string } | null;
+  base?: {
+    ref?: string;
+    repo?: { private?: boolean; permissions?: { push?: boolean; maintain?: boolean; admin?: boolean } | null } | null;
+  } | null;
+}
+
+export interface IApiReview {
+  state?: string;
+  submitted_at?: string | null;
+  user?: { login?: string } | null;
+}
+
+export interface ICombinedStatus {
+  state?: string;
+  statuses?: ({ context?: string; state?: string; target_url?: string | null } | null)[] | null;
 }
 
 export interface ICheckRunList {
@@ -98,6 +144,11 @@ export function describeError(error: unknown): string {
 /**
  * A thin wrapper around Octokit that adds ETag-based conditional requests and rate limit bookkeeping.
  *
+ * REST only, and not by preference: GitHub's GraphQL endpoint answers a browser's CORS preflight
+ * with a 403 and no `Access-Control-Allow-Origin`, so a page can never reach it. The REST API
+ * does send `Access-Control-Allow-Origin: *`, which is what makes a backend-free dashboard
+ * possible at all.
+ *
  * Every GET goes out with an `If-None-Match` header when a previous response for the same
  * route + parameters is known. GitHub answers unchanged resources with a `304 Not Modified`,
  * which does not count against the REST rate limit, so polling stays cheap.
@@ -110,7 +161,7 @@ export class GitHubClient {
   private readonly byOwner = new Map<string, Octokit>();
   private readonly cache = new Map<string, ICacheEntry>();
   private rateLimitValue: IRateLimit | undefined;
-  private graphqlRateLimitValue: IGraphqlRateLimit | undefined;
+  private searchRateLimitValue: IRateLimit | undefined;
 
   /**
    * @param token A personal access token. Every request carries one: unlike a per-repository
@@ -128,39 +179,17 @@ export class GitHubClient {
   }
 
   /**
-   * The quota left on the REST API, as of the last response that reported it.
+   * The quota left on the core REST API, as of the last response that reported it.
    */
   public get rateLimit(): IRateLimit | undefined {
     return this.rateLimitValue;
   }
 
   /**
-   * The quota left on the GraphQL API, which is counted in points rather than requests and so is
-   * tracked apart from the REST one.
+   * The quota left for search, which GitHub meters as its own much smaller bucket.
    */
-  public get graphqlRateLimit(): IGraphqlRateLimit | undefined {
-    return this.graphqlRateLimitValue;
-  }
-
-  /**
-   * Runs a GraphQL query and records the quota it reports.
-   *
-   * GraphQL has no equivalent of a conditional request — every query costs points whether or not
-   * anything changed — so this deliberately has no ETag cache behind it.
-   * @param query A GraphQL document.
-   * @param variables Its variables.
-   * @param owner The owner this query is about, so the right token is used.
-   */
-  public async graphql<T>(query: string, variables: Record<string, unknown>, owner?: string): Promise<T> {
-    const data = await this.clientFor(owner).graphql<T & { rateLimit?: IGraphqlRateLimit | null }>(
-      query,
-      variables,
-    );
-    const quota = data.rateLimit;
-    if (quota !== null && quota !== undefined) {
-      this.graphqlRateLimitValue = quota;
-    }
-    return data;
+  public get searchRateLimit(): IRateLimit | undefined {
+    return this.searchRateLimitValue;
   }
 
   /**
@@ -184,6 +213,77 @@ export class GitHubClient {
    */
   public async checkOrgAccess(org: string): Promise<void> {
     await this.conditionalRequest('GET /orgs/{org}/repos', { org, per_page: 1 }, org);
+  }
+
+  /**
+   * Runs one page of an issue search.
+   * @param query The search query.
+   * @param page The one-based page number.
+   * @param perPage How many results per page, up to 100.
+   * @param owner The owner this search is about, so the right token is used.
+   */
+  public async searchPrs(
+    query: string,
+    page: number,
+    perPage: number,
+    owner: string | undefined,
+  ): Promise<ISearchResponse> {
+    const { data } = await this.conditionalRequest<ISearchResponse>('GET /search/issues', {
+      q: query,
+      per_page: perPage,
+      page,
+      // GitHub's legacy issue search is retired; the qualifiers this app uses need the newer one.
+      advanced_search: 'true',
+    }, owner);
+    return data;
+  }
+
+  /**
+   * Reads one pull request in full.
+   *
+   * This is what the search cannot give: the head commit to look up checks by, the head and base
+   * branch names, and whether GitHub thinks it still merges.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   */
+  public async getPr(owner: string, repo: string, number: number): Promise<IApiPullRequest> {
+    const { data } = await this.conditionalRequest<IApiPullRequest>(
+      'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+      { owner, repo, pull_number: number },
+      owner,
+    );
+    return data;
+  }
+
+  /**
+   * Reads the combined commit status of a commit — the older, non-Actions half of CI.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param ref A commit sha.
+   */
+  public async getCombinedStatus(owner: string, repo: string, ref: string): Promise<ICombinedStatus> {
+    const { data } = await this.conditionalRequest<ICombinedStatus>(
+      'GET /repos/{owner}/{repo}/commits/{ref}/status',
+      { owner, repo, ref, per_page: 30 },
+      owner,
+    );
+    return data;
+  }
+
+  /**
+   * Reads the reviews of a pull request, which is the only way REST reports a review decision.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   */
+  public async getReviews(owner: string, repo: string, number: number): Promise<IApiReview[]> {
+    const { data } = await this.conditionalRequest<IApiReview[]>(
+      'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews',
+      { owner, repo, pull_number: number, per_page: 100 },
+      owner,
+    );
+    return data;
   }
 
   /**
@@ -364,7 +464,13 @@ export class GitHubClient {
     const remaining = Number(headers['x-ratelimit-remaining']);
     const limit = Number(headers['x-ratelimit-limit']);
     const reset = Number(headers['x-ratelimit-reset']);
-    if (Number.isFinite(remaining) && Number.isFinite(limit) && Number.isFinite(reset)) {
+    if (!Number.isFinite(remaining) || !Number.isFinite(limit) || !Number.isFinite(reset)) {
+      return;
+    }
+    // Search is metered in its own bucket, so its headers must not be mistaken for the core one.
+    if (headers['x-ratelimit-resource'] === 'search') {
+      this.searchRateLimitValue = { remaining, limit, reset };
+    } else {
       this.rateLimitValue = { remaining, limit, reset };
     }
   }

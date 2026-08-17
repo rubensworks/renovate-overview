@@ -1,18 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyChecks,
+  applyDetail,
   authorsFor,
   buildSearchQuery,
   checkRunState,
   describeScope,
   mergePrs,
-  normalizePage,
-  normalizePr,
+  normalizeSearchItem,
   planSearches,
+  repoFromUrl,
+  reviewDecisionFrom,
   splitScope,
   statusContextState,
+  worstCheckState,
 } from '../src/lib/search';
-import type { IGraphqlRateLimit, IRenovatePr } from '../src/lib/types';
-import { SETTINGS, node, page, pr } from './fixtures';
+import type { ICombinedStatus } from '../src/lib/search';
+import type { IRenovatePr } from '../src/lib/types';
+import { SETTINGS, pr, prDetail, searchItem } from './fixtures';
 
 describe('authorsFor', () => {
   it('defaults to the three Renovate logins', () => {
@@ -106,27 +111,33 @@ describe('buildSearchQuery', () => {
 });
 
 const ABSENT: string | null | undefined = undefined;
-const ABSENT_QUOTA: IGraphqlRateLimit | undefined = undefined;
+const NO_STATUS: ICombinedStatus | undefined = undefined;
 
 describe('checkRunState', () => {
   it('calls anything not finished pending', () => {
-    expect(checkRunState('QUEUED', null)).toBe('pending');
-    expect(checkRunState('IN_PROGRESS', null)).toBe('pending');
+    expect(checkRunState('queued', null)).toBe('pending');
+    expect(checkRunState('in_progress', null)).toBe('pending');
     expect(checkRunState(ABSENT, ABSENT)).toBe('pending');
   });
 
-  it('maps the finished conclusions', () => {
+  it('maps the finished conclusions, whatever their casing', () => {
+    expect(checkRunState('completed', 'success')).toBe('success');
     expect(checkRunState('COMPLETED', 'SUCCESS')).toBe('success');
-    expect(checkRunState('COMPLETED', 'FAILURE')).toBe('failure');
-    expect(checkRunState('COMPLETED', 'TIMED_OUT')).toBe('failure');
-    expect(checkRunState('COMPLETED', 'STARTUP_FAILURE')).toBe('failure');
-    expect(checkRunState('COMPLETED', 'ACTION_REQUIRED')).toBe('error');
+    expect(checkRunState('completed', 'failure')).toBe('failure');
+    expect(checkRunState('completed', 'timed_out')).toBe('failure');
+    expect(checkRunState('completed', 'startup_failure')).toBe('failure');
+    expect(checkRunState('completed', 'action_required')).toBe('error');
+  });
+
+  it('says nothing about a finished check that reports no conclusion', () => {
+    expect(checkRunState('completed', null)).toBe('none');
+    expect(checkRunState('completed', ABSENT)).toBe('none');
   });
 
   it('treats a cancelled or skipped check as saying nothing, rather than as a failure', () => {
-    expect(checkRunState('COMPLETED', 'CANCELLED')).toBe('none');
-    expect(checkRunState('COMPLETED', 'SKIPPED')).toBe('none');
-    expect(checkRunState('COMPLETED', 'NEUTRAL')).toBe('none');
+    expect(checkRunState('completed', 'cancelled')).toBe('none');
+    expect(checkRunState('completed', 'skipped')).toBe('none');
+    expect(checkRunState('completed', 'neutral')).toBe('none');
   });
 });
 
@@ -141,175 +152,264 @@ describe('statusContextState', () => {
   });
 });
 
-describe('normalizePr', () => {
-  it('turns a search node into a pull request', () => {
-    expect(normalizePr(node())).toEqual(pr());
+describe('worstCheckState', () => {
+  it('is none when there is nothing to judge', () => {
+    expect(worstCheckState([])).toBe('none');
   });
 
-  it('resolves what it updates straight away, from the title and branch', () => {
-    const parsed = normalizePr(node());
-    expect(parsed?.parse.source).toBe('title');
-    expect(parsed?.parse.updates.map(update => update.groupKey)).toEqual([ 'lodash' ]);
-    expect(parsed?.bodyLoaded).toBe(false);
+  it('lets the worst one speak for the commit', () => {
+    expect(worstCheckState([
+      { name: 'a', state: 'success', url: undefined },
+      { name: 'b', state: 'failure', url: undefined },
+    ])).toBe('failure');
+    expect(worstCheckState([
+      { name: 'a', state: 'success', url: undefined },
+      { name: 'b', state: 'pending', url: undefined },
+    ])).toBe('pending');
   });
 
-  it('drops a node that is not a pull request at all', () => {
-    expect(normalizePr(null)).toBeUndefined();
-    expect(normalizePr({})).toBeUndefined();
-    expect(normalizePr(node({ id: undefined }))).toBeUndefined();
-    expect(normalizePr(node({ number: undefined }))).toBeUndefined();
-    expect(normalizePr(node({ repository: null }))).toBeUndefined();
-  });
-
-  it('reads a head commit with no checks as grey, not as a failure', () => {
-    const parsed = normalizePr(node({
-      commits: { nodes: [{ commit: { oid: 'abc', statusCheckRollup: null }}]},
-    }));
-    expect(parsed?.checkState).toBe('none');
-    expect(parsed?.checks).toEqual([]);
-  });
-
-  it('trusts the rollup state over the contexts it was given, which are capped at 30', () => {
-    const parsed = normalizePr(node({
-      commits: {
-        nodes: [{
-          commit: {
-            oid: 'abc',
-            statusCheckRollup: {
-              state: 'FAILURE',
-              contexts: {
-                totalCount: 40,
-                nodes: [{ name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: null }],
-              },
-            },
-          },
-        }],
-      },
-    }));
-    expect(parsed?.checkState).toBe('failure');
-    expect(parsed?.checks).toEqual([{ name: 'build', state: 'success', url: undefined }]);
-  });
-
-  it('reads commit statuses beside check runs, and skips anything it cannot name', () => {
-    const parsed = normalizePr(node({
-      commits: {
-        nodes: [{
-          commit: {
-            oid: 'abc',
-            statusCheckRollup: {
-              state: 'PENDING',
-              contexts: {
-                totalCount: 3,
-                nodes: [
-                  { context: 'ci/travis', state: 'PENDING', targetUrl: 'https://travis' },
-                  { context: 'ci/none', state: 'SUCCESS', targetUrl: null },
-                  null,
-                  {},
-                ],
-              },
-            },
-          },
-        }],
-      },
-    }));
-    expect(parsed?.checks).toEqual([
-      { name: 'ci/travis', state: 'pending', url: 'https://travis' },
-      { name: 'ci/none', state: 'success', url: undefined },
-    ]);
-    expect(parsed?.checkState).toBe('pending');
-  });
-
-  it('treats an uncomputed mergeability as unknown rather than as a conflict', () => {
-    expect(normalizePr(node({ mergeable: 'UNKNOWN' }))?.mergeable).toBe('UNKNOWN');
-    expect(normalizePr(node({ mergeable: null }))?.mergeable).toBe('UNKNOWN');
-    expect(normalizePr(node({ mergeable: 'CONFLICTING' }))?.mergeable).toBe('CONFLICTING');
-  });
-
-  it('keeps only the review decisions it knows', () => {
-    expect(normalizePr(node({ reviewDecision: 'APPROVED' }))?.reviewDecision).toBe('APPROVED');
-    expect(normalizePr(node({ reviewDecision: 'CHANGES_REQUESTED' }))?.reviewDecision)
-      .toBe('CHANGES_REQUESTED');
-    expect(normalizePr(node({ reviewDecision: 'REVIEW_REQUIRED' }))?.reviewDecision)
-      .toBe('REVIEW_REQUIRED');
-    expect(normalizePr(node({ reviewDecision: 'ODD' }))?.reviewDecision).toBeNull();
-  });
-
-  it('reads whether the viewer could merge it themselves', () => {
-    for (const permission of [ 'ADMIN', 'MAINTAIN', 'WRITE' ]) {
-      expect(normalizePr(node({
-        repository: { nameWithOwner: 'a/b', viewerPermission: permission },
-      }))?.viewerCanMerge).toBe(true);
-    }
-    for (const permission of [ 'TRIAGE', 'READ', null ]) {
-      expect(normalizePr(node({
-        repository: { nameWithOwner: 'a/b', viewerPermission: permission },
-      }))?.viewerCanMerge).toBe(false);
-    }
-  });
-
-  it('survives a node with almost every optional field missing', () => {
-    const parsed = normalizePr({ id: 'x', number: 1, repository: { nameWithOwner: 'a/b' }});
-    expect(parsed).toEqual({
-      id: 'x',
-      repo: 'a/b',
-      owner: 'a',
-      number: 1,
-      title: '',
-      url: '',
-      branch: '',
-      baseBranch: '',
-      author: '',
-      createdAt: '',
-      updatedAt: '',
-      isDraft: false,
-      isPrivate: false,
-      labels: [],
-      mergeable: 'UNKNOWN',
-      reviewDecision: null,
-      viewerCanMerge: false,
-      checkState: 'none',
-      checks: [],
-      headSha: '',
-      parse: {
-        updates: [],
-        isGroupPr: false,
-        groupName: undefined,
-        updateType: 'unknown',
-        source: 'unknown',
-        disagreements: [],
-      },
-      bodyLoaded: false,
-    });
-  });
-
-  it('falls back to the created time when there is no update time', () => {
-    expect(normalizePr(node({ updatedAt: undefined }))?.updatedAt).toBe('2026-08-01T10:00:00Z');
-  });
-
-  it('falls back to the head ref oid when the commit carries none', () => {
-    expect(normalizePr(node({ commits: null }))?.headSha).toBe('deadbeef');
-  });
-
-  it('reads the owner out of the full name when the repository does not name one', () => {
-    expect(normalizePr(node({ repository: { nameWithOwner: 'solid/spec' }}))?.owner).toBe('solid');
-    expect(normalizePr({ id: 'x', number: 1, repository: { nameWithOwner: '' }})?.owner).toBe('');
-    expect(normalizePr({ id: 'x', number: 1, repository: { nameWithOwner: 'noslash' }})?.owner).toBe('');
-  });
-
-  it('drops labels that have no name', () => {
-    expect(normalizePr(node({ labels: { nodes: [{ name: 'a' }, null, {}]}}))?.labels).toEqual([ 'a' ]);
-    expect(normalizePr(node({ labels: null }))?.labels).toEqual([]);
+  it('is none when every check is itself inconclusive', () => {
+    expect(worstCheckState([{ name: 'a', state: 'none', url: undefined }])).toBe('none');
   });
 });
 
-describe('normalizePage', () => {
-  it('normalises every node it recognises', () => {
-    expect(normalizePage(page([ node(), null, {}]))).toEqual([ pr() ]);
+describe('repoFromUrl', () => {
+  it('reads the repository out of an API URL', () => {
+    expect(repoFromUrl('https://api.github.com/repos/rubensworks/jbr.js')).toBe('rubensworks/jbr.js');
   });
 
-  it('copes with a page that carries no search block at all', () => {
-    expect(normalizePage({ rateLimit: ABSENT_QUOTA })).toEqual([]);
-    expect(normalizePage({ rateLimit: ABSENT_QUOTA, search: { nodes: null }})).toEqual([]);
+  it('finds nothing in anything else', () => {
+    expect(repoFromUrl('https://api.github.com/users/rubensworks')).toBeUndefined();
+    expect(repoFromUrl(ABSENT)).toBeUndefined();
+  });
+});
+
+describe('normalizeSearchItem', () => {
+  it('turns a search result into a pull request', () => {
+    expect(normalizeSearchItem(searchItem())).toEqual(pr({
+      // The search says nothing about any of this; the detail fetch fills it in.
+      branch: '',
+      baseBranch: '',
+      headSha: '',
+      mergeable: 'UNKNOWN',
+      checkState: 'none',
+      checks: [],
+      detailLoaded: false,
+    }));
+  });
+
+  it('identifies a pull request by owner, repo and number', () => {
+    expect(normalizeSearchItem(searchItem())?.id).toBe('rubensworks/jbr.js#42');
+  });
+
+  it('drops anything that is not a pull request', () => {
+    expect(normalizeSearchItem(null)).toBeUndefined();
+    expect(normalizeSearchItem({})).toBeUndefined();
+    // An issue, which the same search endpoint also returns.
+    expect(normalizeSearchItem(searchItem({ pull_request: undefined }))).toBeUndefined();
+    expect(normalizeSearchItem(searchItem({ pull_request: null }))).toBeUndefined();
+    expect(normalizeSearchItem(searchItem({ number: undefined }))).toBeUndefined();
+    expect(normalizeSearchItem(searchItem({ repository_url: 'nonsense' }))).toBeUndefined();
+  });
+
+  it('parses the body the search already handed over, rather than fetching it again', () => {
+    const body = [
+      '| Package | Type | Update | Change |',
+      '|---|---|---|---|',
+      '| [eslint](u) | devDependencies | minor | [`8.56.0` -> `8.57.0`](d) |',
+      '| [@types/node](u) | devDependencies | patch | [`20.11.4` -> `20.11.5`](d) |',
+    ].join('\n');
+    const parsed = normalizeSearchItem(searchItem({ title: 'Update all non-major dependencies', body }));
+    expect(parsed?.bodyLoaded).toBe(true);
+    expect(parsed?.parse.source).toBe('body');
+    expect(parsed?.parse.updates.map(update => update.groupKey)).toEqual([ 'eslint', 'types-node' ]);
+  });
+
+  it('assumes the viewer could merge it until something says otherwise', () => {
+    expect(normalizeSearchItem(searchItem())?.viewerCanMerge).toBe(true);
+  });
+
+  it('survives an item with almost every optional field missing', () => {
+    const parsed = normalizeSearchItem({
+      number: 1,
+      repository_url: 'https://api.github.com/repos/a/b',
+      pull_request: {},
+    });
+    expect(parsed?.repo).toBe('a/b');
+    expect(parsed?.owner).toBe('a');
+    expect(parsed?.title).toBe('');
+    expect(parsed?.labels).toEqual([]);
+    expect(parsed?.updatedAt).toBe('');
+  });
+
+  it('falls back to the created time when there is no update time', () => {
+    expect(normalizeSearchItem(searchItem({ updated_at: undefined }))?.updatedAt)
+      .toBe('2026-08-01T10:00:00Z');
+  });
+
+  it('drops labels that have no name', () => {
+    expect(normalizeSearchItem(searchItem({ labels: [{ name: 'a' }, null, {}]}))?.labels).toEqual([ 'a' ]);
+    expect(normalizeSearchItem(searchItem({ labels: null }))?.labels).toEqual([]);
+  });
+});
+
+describe('applyDetail', () => {
+  it('fills in what the search could not say', () => {
+    const enriched = applyDetail(pr({ branch: '', headSha: '', detailLoaded: false }), prDetail());
+    expect(enriched.branch).toBe('renovate/lodash-4.x');
+    expect(enriched.baseBranch).toBe('master');
+    expect(enriched.headSha).toBe('deadbeef');
+    expect(enriched.mergeable).toBe('MERGEABLE');
+    expect(enriched.detailLoaded).toBe(true);
+  });
+
+  it('reads mergeability, including the null GitHub sends while it works it out', () => {
+    expect(applyDetail(pr(), prDetail({ mergeable: false })).mergeable).toBe('CONFLICTING');
+    expect(applyDetail(pr(), prDetail({ mergeable: null })).mergeable).toBe('UNKNOWN');
+  });
+
+  it('reads whether the viewer could merge it themselves', () => {
+    for (const permissions of [{ push: true }, { maintain: true }, { admin: true }]) {
+      expect(applyDetail(pr(), prDetail({ base: { repo: { permissions }}})).viewerCanMerge).toBe(true);
+    }
+    expect(applyDetail(pr(), prDetail({ base: { repo: { permissions: { push: false }}}})).viewerCanMerge)
+      .toBe(false);
+  });
+
+  it('keeps what it had when the detail names no permissions at all', () => {
+    expect(applyDetail(pr({ viewerCanMerge: true }), prDetail({ base: { repo: {}}})).viewerCanMerge)
+      .toBe(true);
+    expect(applyDetail(pr({ viewerCanMerge: true }), prDetail({ base: null })).viewerCanMerge).toBe(true);
+  });
+
+  it('keeps what it had for anything the detail leaves out', () => {
+    const before = pr({ branch: 'kept', baseBranch: 'kept-base', headSha: 'kept-sha' });
+    const after = applyDetail(before, { head: null, base: null });
+    expect(after.branch).toBe('kept');
+    expect(after.baseBranch).toBe('kept-base');
+    expect(after.headSha).toBe('kept-sha');
+    expect(after.updatedAt).toBe(before.updatedAt);
+  });
+
+  it('re-parses now that the branch is known', () => {
+    const before = pr({ title: 'Merge branch master into develop', branch: '', detailLoaded: false });
+    expect(before.parse.source).toBe('unknown');
+    const after = applyDetail(before, prDetail({ head: { ref: 'renovate/lodash-4.x', sha: 'abc' }}));
+    expect(after.parse.source).toBe('branch');
+    expect(after.parse.updates[0]?.groupKey).toBe('lodash');
+  });
+
+  it('parses the body when the detail carries one', () => {
+    const withBody = applyDetail(pr({ bodyLoaded: false }), prDetail({
+      body: '| Package | Update |\n|---|---|\n| lodash | patch |',
+    }));
+    expect(withBody.bodyLoaded).toBe(true);
+    expect(withBody.parse.source).toBe('body');
+  });
+
+  it('never throws away a body the search already gave it', () => {
+    const fromSearch = pr({
+      title: 'Update all non-major dependencies',
+      branch: '',
+      detailLoaded: false,
+      bodyLoaded: true,
+      parse: {
+        updates: [{ depName: 'eslint', groupKey: 'eslint', updateType: 'minor', source: 'body' }],
+        isGroupPr: true,
+        groupName: undefined,
+        updateType: 'minor',
+        source: 'body',
+        disagreements: [],
+      },
+    });
+    const after = applyDetail(fromSearch, prDetail({ body: null }));
+    expect(after.parse.source).toBe('body');
+    expect(after.parse.updates.map(update => update.groupKey)).toEqual([ 'eslint' ]);
+    // The rest of the detail still lands.
+    expect(after.branch).toBe('renovate/lodash-4.x');
+  });
+
+  it('parses from the branch when no body has been seen at all', () => {
+    expect(applyDetail(pr({ bodyLoaded: false }), prDetail({ body: null })).bodyLoaded).toBe(false);
+  });
+});
+
+describe('applyChecks', () => {
+  it('reads check runs', () => {
+    const enriched = applyChecks(pr({ checks: [], checkState: 'none' }), [
+      { name: 'build', status: 'completed', conclusion: 'success', details_url: 'https://ci/1' },
+      { name: 'lint', status: 'completed', conclusion: 'failure', details_url: null },
+    ], NO_STATUS);
+    expect(enriched.checks).toEqual([
+      { name: 'build', state: 'success', url: 'https://ci/1' },
+      { name: 'lint', state: 'failure', url: undefined },
+    ]);
+    expect(enriched.checkState).toBe('failure');
+  });
+
+  it('reads commit statuses beside them, because a repository may use either half of CI', () => {
+    const enriched = applyChecks(pr(), [], {
+      state: 'pending',
+      statuses: [
+        { context: 'ci/travis', state: 'pending', target_url: 'https://travis' },
+        { context: 'ci/none', state: 'success', target_url: null },
+        { context: 'ci/silent' },
+        null,
+        {},
+      ],
+    });
+    expect(enriched.checks).toEqual([
+      { name: 'ci/travis', state: 'pending', url: 'https://travis' },
+      { name: 'ci/none', state: 'success', url: undefined },
+      { name: 'ci/silent', state: 'none', url: undefined },
+    ]);
+    expect(enriched.checkState).toBe('pending');
+  });
+
+  it('reads a commit with neither as having no checks', () => {
+    const enriched = applyChecks(pr(), [], { statuses: null });
+    expect(enriched.checks).toEqual([]);
+    expect(enriched.checkState).toBe('none');
+  });
+});
+
+describe('reviewDecisionFrom', () => {
+  it('has nothing to say about a pull request nobody reviewed', () => {
+    expect(reviewDecisionFrom([])).toBeNull();
+  });
+
+  it('reports an approval', () => {
+    expect(reviewDecisionFrom([{ state: 'APPROVED', user: { login: 'a' }}])).toBe('APPROVED');
+  });
+
+  it('lets a request for changes outweigh any number of approvals', () => {
+    expect(reviewDecisionFrom([
+      { state: 'APPROVED', user: { login: 'a' }},
+      { state: 'APPROVED', user: { login: 'b' }},
+      { state: 'CHANGES_REQUESTED', user: { login: 'c' }},
+    ])).toBe('CHANGES_REQUESTED');
+  });
+
+  it('counts only the latest verdict of each reviewer', () => {
+    expect(reviewDecisionFrom([
+      { state: 'CHANGES_REQUESTED', user: { login: 'a' }},
+      { state: 'APPROVED', user: { login: 'a' }},
+    ])).toBe('APPROVED');
+    expect(reviewDecisionFrom([
+      { state: 'APPROVED', user: { login: 'a' }},
+      { state: 'DISMISSED', user: { login: 'a' }},
+    ])).toBeNull();
+  });
+
+  it('ignores comments, which are not verdicts', () => {
+    expect(reviewDecisionFrom([
+      { state: 'APPROVED', user: { login: 'a' }},
+      { state: 'COMMENTED', user: { login: 'a' }},
+    ])).toBe('APPROVED');
+  });
+
+  it('ignores a review with no author', () => {
+    expect(reviewDecisionFrom([{ state: 'APPROVED' }])).toBeNull();
   });
 });
 

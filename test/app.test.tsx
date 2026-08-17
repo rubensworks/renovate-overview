@@ -2,12 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/app';
 import type { IViewer } from '../src/lib/types';
-import { node, page } from './fixtures';
+import { searchItem, searchPage } from './fixtures';
 
-const { getViewerMock, checkOrgAccessMock, graphqlMock, constructorMock } = vi.hoisted(() => ({
+const { getViewerMock, checkOrgAccessMock, searchMock, constructorMock } = vi.hoisted(() => ({
   getViewerMock: vi.fn(),
   checkOrgAccessMock: vi.fn(),
-  graphqlMock: vi.fn(),
+  searchMock: vi.fn(),
   constructorMock: vi.fn(),
 }));
 
@@ -15,8 +15,13 @@ vi.mock('../src/lib/githubClient', () => ({
   GitHubClient: class FakeClient {
     public readonly getViewer = getViewerMock;
     public readonly checkOrgAccess = checkOrgAccessMock;
-    public readonly graphql = graphqlMock;
-    public readonly graphqlRateLimit = undefined;
+    public readonly searchPrs = searchMock;
+    public readonly getPr = vi.fn(async() => ({ state: 'open', head: { ref: 'r', sha: 's' }}));
+    public readonly getCheckRuns = vi.fn(async() => ({ runs: [], notModified: false }));
+    public readonly getCombinedStatus = vi.fn(async() => ({ statuses: []}));
+    public readonly getReviews = vi.fn(async() => []);
+    public readonly rateLimit = undefined;
+    public readonly searchRateLimit = undefined;
 
     public constructor(token: string, ownerTokens: unknown) {
       constructorMock(token, ownerTokens);
@@ -36,8 +41,8 @@ beforeEach(() => {
   getViewerMock.mockReset();
   checkOrgAccessMock.mockReset();
   constructorMock.mockReset();
-  graphqlMock.mockReset();
-  graphqlMock.mockResolvedValue(page([]));
+  searchMock.mockReset();
+  searchMock.mockResolvedValue(searchPage([]));
   localStorage.clear();
   sessionStorage.clear();
   delete document.documentElement.dataset.theme;
@@ -163,34 +168,33 @@ describe('App', () => {
     it('searches as soon as the session exists, and lists what comes back', async() => {
       localStorage.setItem(TOKEN_KEY, 'stored');
       getViewerMock.mockResolvedValue(VIEWER);
-      graphqlMock.mockResolvedValue(page([ node() ]));
+      searchMock.mockResolvedValue(searchPage([ searchItem() ]));
       render(<App />);
 
       expect(await screen.findByText('rubensworks/jbr.js')).toBeDefined();
-      const [ , variables ] = graphqlMock.mock.calls[0] as [string, { q: string }];
-      expect(variables.q).toContain('user:rubensworks');
+      expect(String(searchMock.mock.calls[0]?.[0])).toContain('user:rubensworks');
     });
 
     it('rebuilds the store when the token is replaced, rather than keeping the old rows', async() => {
       localStorage.setItem(TOKEN_KEY, 'stored');
       getViewerMock.mockResolvedValue(VIEWER);
-      graphqlMock.mockResolvedValue(page([ node() ]));
+      searchMock.mockResolvedValue(searchPage([ searchItem() ]));
       render(<App />);
       await screen.findByText('rubensworks/jbr.js');
-      const before = graphqlMock.mock.calls.length;
+      const before = searchMock.mock.calls.length;
 
       await openSettings();
       fireEvent.change(screen.getByLabelText('Replace it'), { target: { value: 'fresh' }});
       fireEvent.click(screen.getByRole('button', { name: 'Save token' }));
 
-      await waitFor(() => expect(graphqlMock.mock.calls.length).toBeGreaterThan(before));
+      await waitFor(() => expect(searchMock.mock.calls.length).toBeGreaterThan(before));
       expect(constructorMock).toHaveBeenCalledWith('fresh', []);
     });
 
     it('surfaces a failed search in the status strip', async() => {
       localStorage.setItem(TOKEN_KEY, 'stored');
       getViewerMock.mockResolvedValue(VIEWER);
-      graphqlMock.mockRejectedValue(new Error('Rate limit exceeded'));
+      searchMock.mockRejectedValue(new Error('Rate limit exceeded'));
       render(<App />);
 
       expect(await screen.findByText('Rate limit exceeded')).toBeDefined();

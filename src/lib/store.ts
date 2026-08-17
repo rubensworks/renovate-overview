@@ -1,44 +1,32 @@
 import { NothingToDoError, backoffFor, mergeMethodFor, runAction } from './actions';
 import type { GitHubClient } from './githubClient';
 import { asHttpError, describeError } from './githubClient';
-import { resolveUpdates } from './renovate/resolve';
-import type { ISearchPage, ISearchScope } from './search';
+import type { ISearchScope } from './search';
 import {
-  BODIES_QUERY,
-  MERGEABLE_QUERY,
   PAGE_SIZE,
   SEARCH_CEILING,
-  SEARCH_QUERY,
+  applyChecks,
+  applyDetail,
   authorsFor,
   buildSearchQuery,
   describeScope,
   mergePrs,
-  normalizePage,
+  normalizeSearchItem,
   planSearches,
+  reviewDecisionFrom,
   splitScope,
-  checkRunState,
 } from './search';
 import type {
   ActionKind,
-  CheckState,
   IActionResult,
   IDashboardState,
-  IGraphqlRateLimit,
   IOwnerToken,
-  IPrCheck,
   IRenovatePr,
-  IRenovateResolution,
   ISettings,
-  MergeMethod,
+  IRateLimit,
   ITruncatedScope,
-  Mergeable,
+  MergeMethod,
 } from './types';
-
-/**
- * How long to wait before asking again about the pull requests GitHub had not finished computing
- * mergeability for. It is computed on demand, and asking is what triggers it.
- */
-export const MERGEABLE_RETRY_MS = 3000;
 
 /**
  * A run of pages is stopped here so that one runaway search cannot spend the whole GraphQL quota.
@@ -46,10 +34,13 @@ export const MERGEABLE_RETRY_MS = 3000;
 const MAX_PAGES = 40;
 
 /**
- * How many bodies to ask for at once. Bodies are large, so a big batch is a slow response rather
- * than a cheap one; several small ones also let rows fill in progressively.
+ * How many pull requests are enriched at once.
+ *
+ * The search says which pull requests exist but not what state they are in, so each one needs a
+ * couple of requests of its own. Doing a handful at a time keeps rows filling in steadily
+ * without opening dozens of connections at once.
  */
-export const BODY_BATCH_SIZE = 10;
+export const ENRICH_BATCH_SIZE = 6;
 
 /**
  * How many failures in a row before the queue gives up.
@@ -104,7 +95,7 @@ export const INITIAL_STATE: IDashboardState = {
   selected: [],
   droppedFromSelection: 0,
   actionRun: undefined,
-  restRateLimit: undefined,
+  searchRateLimit: undefined,
   paused: false,
   backoffUntil: undefined,
   backoffReason: undefined,
@@ -115,50 +106,9 @@ export const INITIAL_STATE: IDashboardState = {
 };
 
 interface IScopeResult {
-  prs: IRenovatePr[];
   issueCount: number;
   truncated: ITruncatedScope | undefined;
 }
-
-interface IMergeableNode {
-  id?: string;
-  mergeable?: string | null;
-}
-
-interface IMergeableResponse {
-  nodes?: (IMergeableNode | null)[] | null;
-}
-
-interface IBodyNode {
-  id?: string;
-  body?: string | null;
-}
-
-interface IBodyResponse {
-  nodes?: (IBodyNode | null)[] | null;
-}
-
-interface IRefreshNode {
-  id?: string;
-  state?: string | null;
-  updatedAt?: string;
-  mergeable?: string | null;
-  reviewDecision?: string | null;
-}
-
-interface IRefreshResponse {
-  nodes?: (IRefreshNode | null)[] | null;
-}
-
-/**
- * Re-reads the handful of fields a write can change, for the pull requests a write touched.
- */
-const REFRESH_QUERY = `query($ids: [ID!]!) {
-  rateLimit { limit cost remaining resetAt }
-  nodes(ids: $ids) {
-    ... on PullRequest { id state updatedAt mergeable reviewDecision }
-  }
-}`;
 
 /**
  * Owns the pull request data and exposes an immutable snapshot for `useSyncExternalStore`.
@@ -174,13 +124,7 @@ export class DashboardStore {
   private ownerTokens: IOwnerToken[];
   private readonly onSettingsChange: ((settings: ISettings) => void) | undefined;
   private readonly viewerLogin: string;
-  /**
-   * Parsed bodies, keyed by pull request id and update time, so a body is parsed once and a pull
-   * request that has since changed is not shown a stale parse.
-   */
-  private readonly bodyCache = new Map<string, IRenovateResolution>();
-  private readonly bodiesInFlight = new Set<string>();
-  private timer: ReturnType<typeof setTimeout> | undefined;
+  private readonly reviewsInFlight = new Set<string>();
   private ticker: ReturnType<typeof setInterval> | undefined;
   private readonly onVisibilityChange: () => void;
   /**
@@ -255,10 +199,6 @@ export class DashboardStore {
    */
   public dispose(): void {
     this.generation += 1;
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
     if (this.ticker !== undefined) {
       clearInterval(this.ticker);
       this.ticker = undefined;
@@ -318,34 +258,34 @@ export class DashboardStore {
   }
 
   /**
-   * Re-reads the checks of pull requests that were still running, over REST and conditionally.
+   * Re-reads the checks of pull requests that were still running.
    *
-   * A `304` is free, which is what makes a thirty-second interval affordable for the handful of
-   * pull requests that are actually moving.
+   * Conditional, so a `304` for a pull request nothing has happened to is free — which is what
+   * makes a thirty-second interval affordable for the handful that are actually moving.
    * @param prs The pull requests to re-read.
    */
   public async pollChecks(prs: IRenovatePr[]): Promise<void> {
     const generation = this.generation;
-    const updates = new Map<string, { checkState: CheckState; checks: IPrCheck[] }>();
+    const updates = new Map<string, IRenovatePr>();
 
     for (const pr of prs) {
       // Jittered so that a batch does not arrive as a burst, and so two tabs do not sync up.
       this.pendingPolledAt.set(pr.id, Date.now() + Math.floor(Math.random() * PENDING_POLL_MS * 0.3));
       const [ owner, name ] = splitRepo(pr.repo);
       try {
-        const { runs, notModified } = await this.client.getCheckRuns(owner, name, pr.headSha);
+        const checkRuns = await this.client.getCheckRuns(owner, name, pr.headSha);
         if (this.generation !== generation) {
           return;
         }
-        if (notModified) {
+        if (checkRuns.notModified) {
           continue;
         }
-        const checks = runs.map(run => ({
-          name: run.name,
-          state: checkRunState(run.status, run.conclusion),
-          url: run.details_url ?? undefined,
-        }));
-        updates.set(pr.id, { checkState: worstOf(checks), checks });
+        const status = await this.client.getCombinedStatus(owner, name, pr.headSha)
+          .catch((): undefined => undefined);
+        if (this.generation !== generation) {
+          return;
+        }
+        updates.set(pr.id, applyChecks(pr, checkRuns.runs, status));
       } catch (error: unknown) {
         if (this.generation !== generation) {
           return;
@@ -358,33 +298,27 @@ export class DashboardStore {
           });
           break;
         }
-        // A single repository the token cannot read its checks for is not worth a banner.
+        // A single repository the token cannot read the checks of is not worth a banner.
       }
     }
 
     this.patch({
       prs: updates.size === 0 ?
         this.state.prs :
-        this.state.prs.map((pr) => {
-          const update = updates.get(pr.id);
-          return update === undefined ? pr : { ...pr, ...update };
-        }),
-      restRateLimit: this.client.rateLimit,
+        this.state.prs.map(pr => updates.get(pr.id) ?? pr),
+      rateLimit: this.client.rateLimit,
     });
   }
 
   /**
-   * Fetches every configured scope, publishing rows as each page arrives.
+   * Fetches every configured scope, publishing rows as each page arrives, then fills in the
+   * detail each row needs to be judged.
    */
   public async refresh(): Promise<void> {
     this.generation += 1;
     const generation = this.generation;
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
 
-    this.patch({ loading: true, error: undefined, bodyError: undefined, truncated: []});
+    this.patch({ loading: true, error: undefined, truncated: []});
 
     const authors = authorsFor(this.settings);
     const groups: IRenovatePr[][] = [];
@@ -393,8 +327,8 @@ export class DashboardStore {
 
     try {
       for (const scope of planSearches(this.viewerLogin, this.settings.orgs, this.ownerTokens)) {
-        // A combined scope that hits the ceiling is retried one owner at a time, which is the only
-        // lever available: the ceiling is per result set, not per account.
+        // A combined scope that hits the ceiling is retried one owner at a time, which is the
+        // only lever available: the ceiling is per result set, not per account.
         const result = await this.fetchScope(scope, authors, generation, groups, totalCount);
         if (this.generation !== generation) {
           return;
@@ -431,15 +365,19 @@ export class DashboardStore {
       prs,
       selected: keptSelection,
       droppedFromSelection: this.state.selected.length - keptSelection.length,
-      loading: false,
       totalCount,
       truncated,
       lastRefreshedAt: Date.now(),
-      rateLimit: this.client.graphqlRateLimit,
-      restRateLimit: this.client.rateLimit,
+      rateLimit: this.client.rateLimit,
+      searchRateLimit: this.client.searchRateLimit,
     });
     this.lastFullPoll = Date.now();
-    this.scheduleMergeableRetry(generation);
+
+    // The rows are on screen; now find out what state each of them is actually in.
+    await this.enrich(prs, generation);
+    if (this.generation === generation) {
+      this.patch({ loading: false });
+    }
   }
 
   private async fetchScope(
@@ -453,32 +391,32 @@ export class DashboardStore {
     const collected: IRenovatePr[] = [];
     // Published progressively, so this slot is claimed before the first page arrives.
     const slot = groups.push(collected) - 1;
-    let after: string | undefined;
     let issueCount = 0;
 
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const response = await this.client.graphql<ISearchPage>(
-        SEARCH_QUERY,
-        { q: query, first: PAGE_SIZE, after: after ?? null },
-        scope.tokenOwner,
-      );
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const response = await this.client.searchPrs(query, page, PAGE_SIZE, scope.tokenOwner);
       if (this.generation !== generation) {
-        return { prs: [], issueCount: 0, truncated: undefined };
+        return { issueCount: 0, truncated: undefined };
       }
-      issueCount = response.search?.issueCount ?? 0;
-      collected.push(...normalizePage(response));
+      issueCount = response.total_count ?? 0;
+      const items = response.items ?? [];
+      for (const item of items) {
+        const pr = normalizeSearchItem(item ?? null);
+        if (pr !== undefined) {
+          collected.push(pr);
+        }
+      }
       groups[slot] = collected;
       this.patch({
         prs: mergePrs(groups),
         totalCount: countSoFar + issueCount,
-        rateLimit: this.client.graphqlRateLimit,
+        rateLimit: this.client.rateLimit,
+        searchRateLimit: this.client.searchRateLimit,
       });
 
-      const pageInfo = response.search?.pageInfo;
-      if (pageInfo?.hasNextPage !== true || typeof pageInfo.endCursor !== 'string') {
+      if (items.length < PAGE_SIZE || collected.length >= issueCount) {
         break;
       }
-      after = pageInfo.endCursor;
     }
 
     // GitHub reports the true match count but hands over at most SEARCH_CEILING of them, so a
@@ -486,125 +424,87 @@ export class DashboardStore {
     const truncated = issueCount >= SEARCH_CEILING ?
         { label: describeScope(scope), count: issueCount } :
       undefined;
-    return { prs: collected, issueCount, truncated };
-  }
-
-  // GitHub computes mergeability lazily; the first answer for a pull request nobody has looked at
-  // in a while is UNKNOWN, and asking is what starts the computation. So ask once more, shortly.
-  private scheduleMergeableRetry(generation: number): void {
-    const pending = this.state.prs.filter(pr => pr.mergeable === 'UNKNOWN').map(pr => pr.id);
-    if (pending.length === 0) {
-      return;
-    }
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      this.resolveMergeable(pending, generation).catch(() => {
-        // Mergeability is an enrichment: a pull request whose state stays unknown still lists.
-      });
-    }, MERGEABLE_RETRY_MS);
-  }
-
-  private async resolveMergeable(ids: string[], generation: number): Promise<void> {
-    const response = await this.client.graphql<IMergeableResponse>(MERGEABLE_QUERY, { ids });
-    if (this.generation !== generation) {
-      return;
-    }
-    const resolved = new Map<string, Mergeable>();
-    for (const node of response.nodes ?? []) {
-      if (node?.id !== undefined && (node.mergeable === 'MERGEABLE' || node.mergeable === 'CONFLICTING')) {
-        resolved.set(node.id, node.mergeable);
-      }
-    }
-    if (resolved.size === 0) {
-      this.patch({ rateLimit: this.client.graphqlRateLimit });
-      return;
-    }
-    this.patch({
-      prs: this.state.prs.map((pr) => {
-        const mergeable = resolved.get(pr.id);
-        return mergeable === undefined ? pr : { ...pr, mergeable };
-      }),
-      rateLimit: this.client.graphqlRateLimit,
-    });
+    return { issueCount, truncated };
   }
 
   /**
-   * Fetches the bodies of the given pull requests and folds them into their parses.
+   * Fills in what the search could not say: the head commit, the branch, the mergeability and
+   * the checks.
    *
-   * Called when something actually needs them: when the list is grouped by dependency, where a
-   * group pull request's members matter, and when a row is expanded. Anything already fetched, or
-   * already in flight, is skipped.
-   * @param ids The pull requests to fetch bodies for.
+   * Rows are published as each batch lands, so a long list settles from the top rather than
+   * appearing all at once at the end.
+   * @param prs The pull requests to enrich.
+   * @param generation The refresh this belongs to.
    */
-  public async loadBodies(ids: string[]): Promise<void> {
-    const generation = this.generation;
-    const wanted = this.state.prs.filter(pr =>
-      ids.includes(pr.id) && !pr.bodyLoaded && !this.bodiesInFlight.has(pr.id));
-
-    // A body already parsed under the same update time needs no request at all.
-    const cached = wanted.filter(pr => this.bodyCache.has(cacheKey(pr)));
-    if (cached.length > 0) {
-      this.applyParses(new Map(cached.map(pr => [ pr.id, this.bodyCache.get(cacheKey(pr)) ])));
-    }
-
-    const toFetch = wanted.filter(pr => !this.bodyCache.has(cacheKey(pr)));
-    for (const pr of toFetch) {
-      this.bodiesInFlight.add(pr.id);
-    }
-
-    try {
-      for (let start = 0; start < toFetch.length; start += BODY_BATCH_SIZE) {
-        const batch = toFetch.slice(start, start + BODY_BATCH_SIZE);
-        const response = await this.client.graphql<IBodyResponse>(
-          BODIES_QUERY,
-          { ids: batch.map(pr => pr.id) },
-        );
-        if (this.generation !== generation) {
-          return;
-        }
-        const bodies = new Map<string, string>();
-        for (const node of response.nodes ?? []) {
-          if (node?.id !== undefined && typeof node.body === 'string') {
-            bodies.set(node.id, node.body);
-          }
-        }
-        const parses = new Map<string, IRenovateResolution | undefined>();
-        for (const pr of batch) {
-          const body = bodies.get(pr.id);
-          // A body GitHub did not hand over still counts as loaded: asking again would fail the
-          // same way, and the title parse is what the row keeps.
-          const parse = body === undefined ? undefined : resolveUpdates(pr, body);
-          if (parse !== undefined) {
-            this.bodyCache.set(cacheKey(pr), parse);
-          }
-          parses.set(pr.id, parse);
-        }
-        this.applyParses(parses);
-        this.patch({ rateLimit: this.client.graphqlRateLimit });
+  private async enrich(prs: IRenovatePr[], generation: number): Promise<void> {
+    for (let start = 0; start < prs.length; start += ENRICH_BATCH_SIZE) {
+      const batch = prs.slice(start, start + ENRICH_BATCH_SIZE);
+      const enriched = await Promise.all(batch.map(async pr => this.enrichOne(pr)));
+      if (this.generation !== generation) {
+        return;
       }
-    } catch (error: unknown) {
-      if (this.generation === generation) {
-        this.patch({ bodyError: describeError(error) });
-      }
-    } finally {
-      for (const pr of toFetch) {
-        this.bodiesInFlight.delete(pr.id);
-      }
+      const byId = new Map(enriched.map(pr => [ pr.id, pr ]));
+      this.patch({
+        prs: this.state.prs.map(pr => byId.get(pr.id) ?? pr),
+        rateLimit: this.client.rateLimit,
+      });
     }
   }
 
-  // A parse of `undefined` means the body was asked for and did not arrive; the row keeps the
-  // parse it already had and is marked loaded so nothing asks again.
-  private applyParses(parses: Map<string, IRenovateResolution | undefined>): void {
-    this.patch({
-      prs: this.state.prs.map((pr) => {
-        if (!parses.has(pr.id)) {
-          return pr;
-        }
-        const parse = parses.get(pr.id);
-        return { ...pr, parse: parse ?? pr.parse, bodyLoaded: true };
-      }),
-    });
+  // One pull request's detail and checks. A failure leaves the row as the search drew it rather
+  // than losing it: a repository whose checks the token cannot read is still a pull request.
+  private async enrichOne(pr: IRenovatePr): Promise<IRenovatePr> {
+    const [ owner, name ] = splitRepo(pr.repo);
+    let next = pr;
+    try {
+      next = applyDetail(pr, await this.client.getPr(owner, name, pr.number));
+    } catch {
+      return { ...pr, detailLoaded: true };
+    }
+    if (next.headSha.length === 0) {
+      return next;
+    }
+    try {
+      const [ runs, status ] = await Promise.all([
+        this.client.getCheckRuns(owner, name, next.headSha),
+        this.client.getCombinedStatus(owner, name, next.headSha).catch((): undefined => undefined),
+      ]);
+      next = applyChecks(next, runs.runs, status);
+    } catch {
+      // Left with no checks, which reads as "no checks" — the same as a commit that has none.
+    }
+    return next;
+  }
+
+  /**
+   * Reads the review decision of one pull request.
+   *
+   * REST has no bulk equivalent of GraphQL's `reviewDecision`, so this costs a request per pull
+   * request and is only spent on the one whose row has been opened.
+   * @param id A pull request id.
+   */
+  public async loadReviewDecision(id: string): Promise<void> {
+    const generation = this.generation;
+    const pr = this.state.prs.find(entry => entry.id === id);
+    if (pr === undefined || this.reviewsInFlight.has(id)) {
+      return;
+    }
+    this.reviewsInFlight.add(id);
+    const [ owner, name ] = splitRepo(pr.repo);
+    try {
+      const decision = reviewDecisionFrom(await this.client.getReviews(owner, name, pr.number));
+      if (this.generation !== generation) {
+        return;
+      }
+      this.patch({
+        prs: this.state.prs.map(entry => (entry.id === id ? { ...entry, reviewDecision: decision } : entry)),
+        rateLimit: this.client.rateLimit,
+      });
+    } catch {
+      // A review decision is an enrichment; a row without one is still perfectly usable.
+    } finally {
+      this.reviewsInFlight.delete(id);
+    }
   }
 
   /**
@@ -726,55 +626,39 @@ export class DashboardStore {
     this.onSettingsChange(next);
   }
 
-  // A write changes one pull request, so one small query brings it back up to date. Re-running
-  // the whole search would cost far more and would still lag the index by a few seconds.
+  // A write changes one pull request, so re-reading just that one brings it back up to date.
+  // Re-running the whole search would cost far more and would still lag the index by seconds.
   private async refreshPrs(prs: IRenovatePr[], generation: number): Promise<void> {
-    if (prs.length === 0) {
+    const gone: string[] = [];
+    const updated = new Map<string, IRenovatePr>();
+
+    for (const pr of prs) {
+      const [ owner, name ] = splitRepo(pr.repo);
+      try {
+        const detail = await this.client.getPr(owner, name, pr.number);
+        if (this.generation !== generation) {
+          return;
+        }
+        // A pull request that has been merged or closed is no longer part of the backlog.
+        if (detail.state !== undefined && detail.state !== 'open') {
+          gone.push(pr.id);
+        } else {
+          updated.set(pr.id, applyDetail(pr, detail));
+        }
+      } catch {
+        // The writes already reported their own outcome; a stale row is a small price next to an
+        // error message about a refresh nobody asked for.
+      }
+    }
+
+    if (this.generation !== generation || (gone.length === 0 && updated.size === 0)) {
       return;
     }
-    try {
-      const response = await this.client.graphql<IRefreshResponse>(
-        REFRESH_QUERY,
-        { ids: prs.map(pr => pr.id) },
-      );
-      if (this.generation !== generation) {
-        return;
-      }
-      const fresh = new Map<string, IRefreshNode>();
-      for (const node of response.nodes ?? []) {
-        if (node?.id !== undefined) {
-          fresh.set(node.id, node);
-        }
-      }
-      this.patch({
-        prs: this.state.prs
-          // A pull request that has been merged or closed is no longer part of the backlog.
-          .filter(pr => fresh.get(pr.id)?.state === undefined || fresh.get(pr.id)?.state === 'OPEN')
-          .map((pr) => {
-            const node = fresh.get(pr.id);
-            if (node === undefined) {
-              return pr;
-            }
-            return {
-              ...pr,
-              updatedAt: node.updatedAt ?? pr.updatedAt,
-              mergeable: node.mergeable === 'MERGEABLE' || node.mergeable === 'CONFLICTING' ?
-                node.mergeable :
-                'UNKNOWN',
-              reviewDecision: node.reviewDecision === 'APPROVED' ||
-                node.reviewDecision === 'CHANGES_REQUESTED' ||
-                node.reviewDecision === 'REVIEW_REQUIRED' ?
-                node.reviewDecision :
-                null,
-            };
-          }),
-        rateLimit: this.client.graphqlRateLimit,
-      });
-      this.setSelection(this.state.selected);
-    } catch {
-      // The writes themselves already reported their own outcome; a stale row is a small price
-      // next to an error message about a refresh nobody asked for.
-    }
+    this.patch({
+      prs: this.state.prs.filter(pr => !gone.includes(pr.id)).map(pr => updated.get(pr.id) ?? pr),
+      rateLimit: this.client.rateLimit,
+    });
+    this.setSelection(this.state.selected);
   }
 
   private updateResult(
@@ -797,29 +681,15 @@ export class DashboardStore {
   }
 }
 
-// The worst state among a commit's checks, which is how a row is coloured when the rollup is not
-// on hand — the REST listing has no equivalent of GraphQL's rollup state.
-function worstOf(checks: IPrCheck[]): CheckState {
-  // `none` is the answer both when there are no checks and when every one of them is itself
-  // inconclusive — a commit whose only check was skipped says nothing either way.
-  const order: CheckState[] = [ 'failure', 'error', 'pending', 'success' ];
-  return order.find(state => checks.some(check => check.state === state)) ?? 'none';
-}
-
 function splitRepo(repo: string): [string, string] {
   const slash = repo.indexOf('/');
   return [ repo.slice(0, Math.max(0, slash)), repo.slice(slash + 1) ];
 }
 
-// A body is only worth reusing while the pull request it came from has not changed.
-function cacheKey(pr: IRenovatePr): string {
-  return `${pr.id}@${pr.updatedAt}`;
-}
-
 /**
- * The GraphQL quota, as a fraction of its limit, or 1 when it is not known yet.
- * @param rateLimit A GraphQL rate limit.
+ * The REST quota, as a fraction of its limit, or 1 when it is not known yet.
+ * @param rateLimit A rate limit.
  */
-export function quotaRatio(rateLimit: IGraphqlRateLimit | undefined): number {
+export function quotaRatio(rateLimit: IRateLimit | undefined): number {
   return rateLimit === undefined ? 1 : rateLimit.remaining / Math.max(1, rateLimit.limit);
 }

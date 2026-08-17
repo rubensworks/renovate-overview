@@ -9,15 +9,6 @@ import type { ActionKind, IRenovatePr, ISettings, MergeMethod } from './types';
 const REBASE_MARKER = /<!--\s*rebase-check\s*-->/u;
 
 /**
- * The GraphQL mutation behind "enable auto-merge", which has no REST equivalent.
- */
-export const AUTO_MERGE_MUTATION = `mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $method }) {
-    clientMutationId
-  }
-}`;
-
-/**
  * Ticks Renovate's rebase checkbox in a pull request body.
  *
  * Returns undefined when there is nothing to do — no checkbox, or one that is already ticked —
@@ -87,7 +78,6 @@ export function mergeMethodFor(repo: string, settings: ISettings): MergeMethod {
 export function isActionAvailable(kind: ActionKind, pr: IRenovatePr): boolean {
   switch (kind) {
     case 'merge':
-    case 'auto-merge':
       return pr.mergeable !== 'CONFLICTING' && !pr.isDraft;
     case 'rerun':
       return failedRunIds(pr).length > 0;
@@ -127,12 +117,6 @@ export async function runAction(
   switch (kind) {
     case 'merge':
       await client.mergePr(owner, name, pr.number, mergeMethodFor(pr.repo, settings));
-      return;
-    case 'auto-merge':
-      await client.graphql(AUTO_MERGE_MUTATION, {
-        id: pr.id,
-        method: mergeMethodFor(pr.repo, settings).toUpperCase(),
-      }, owner);
       return;
     case 'approve':
       await client.approvePr(owner, name, pr.number);
