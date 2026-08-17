@@ -1,0 +1,39 @@
+{
+  "name": "renovate-overview",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A client-side-only dashboard for every open Renovate pull request across your repositories and organisations.",
+  "author": "Ruben Taelman <rubensworks@gmail.com>",
+  "license": "MIT",
+  "repository": "git@github.com:rubensworks/renovate-overview.git",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint . --cache",
+    "lint:fix": "eslint . --cache --fix"
+  },
+  "dependencies": {
+    "@octokit/graphql": "^8.2.2",
+    "@octokit/rest": "^21.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@rubensworks/eslint-config": "^3.1.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^8.57.1",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vitest": "^4.1.10"
+  }
+}
