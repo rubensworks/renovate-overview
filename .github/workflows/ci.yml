@@ -31,6 +31,7 @@ jobs:
         node-version:
           - 22.x
           - 24.x
+          - 26.x
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,6 +41,23 @@ jobs:
       - run: npm ci
       # Fails the build if coverage drops below 100%.
       - run: npm test
+      - name: Submit coverage results
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.github_token }}
+          flag-name: run-${{ matrix.node-version }}
+          parallel: true
+
+  coveralls:
+    name: Coveralls
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consolidate test coverage from different jobs
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.github_token }}
+          parallel-finished: true
 
   build:
     name: Type-check and build
