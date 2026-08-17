@@ -7,6 +7,8 @@ export const SETTINGS: ISettings = {
   extraAuthors: [],
   includeDependabot: false,
   writeActions: false,
+  mergeMethod: 'squash',
+  repoMergeMethods: {},
   theme: 'auto',
 };
 

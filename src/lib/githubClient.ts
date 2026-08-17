@@ -1,5 +1,5 @@
 import { Octokit } from '@octokit/rest';
-import type { IGraphqlRateLimit, IOwnerToken, IRateLimit, IViewer } from './types';
+import type { IGraphqlRateLimit, IOwnerToken, IRateLimit, IViewer, MergeMethod } from './types';
 
 const API_VERSION = '2022-11-28';
 const USER_AGENT = 'renovate-overview';
@@ -63,6 +63,12 @@ export function describeError(error: unknown): string {
         'Access forbidden — a fine-grained token only reaches the owner it was created for';
     case 404:
       return 'Not found — the token has no access to it, or it does not exist';
+    case 405:
+      return 'Not allowed — the repository may forbid this merge method, or the branch is protected';
+    case 409:
+      return 'Conflict — the pull request is no longer mergeable';
+    case 422:
+      return `Rejected by GitHub: ${httpError.message}`;
     case 429:
       return 'Too many requests — GitHub asked us to slow down';
     default:
@@ -159,6 +165,120 @@ export class GitHubClient {
    */
   public async checkOrgAccess(org: string): Promise<void> {
     await this.conditionalRequest('GET /orgs/{org}/repos', { org, per_page: 1 }, org);
+  }
+
+  /**
+   * Merges a pull request.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   * @param method How to merge. A repository can forbid any of the three, and says so with a 405.
+   */
+  public async mergePr(owner: string, repo: string, number: number, method: MergeMethod): Promise<void> {
+    await this.write('PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', {
+      owner,
+      repo,
+      pull_number: number,
+      merge_method: method,
+    }, owner);
+  }
+
+  /**
+   * Approves a pull request, which is what unblocks Renovate's own automerge where it is gated on
+   * a review.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   */
+  public async approvePr(owner: string, repo: string, number: number): Promise<void> {
+    await this.write('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+      owner,
+      repo,
+      pull_number: number,
+      event: 'APPROVE',
+    }, owner);
+  }
+
+  /**
+   * Closes a pull request.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   */
+  public async closePr(owner: string, repo: string, number: number): Promise<void> {
+    await this.write('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
+      owner,
+      repo,
+      pull_number: number,
+      state: 'closed',
+    }, owner);
+  }
+
+  /**
+   * Reads a pull request body, uncached, because it is about to be rewritten.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   */
+  public async getPrBody(owner: string, repo: string, number: number): Promise<string> {
+    const data = await this.write<{ body: string | null }>('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+      owner,
+      repo,
+      pull_number: number,
+    }, owner);
+    return data.body ?? '';
+  }
+
+  /**
+   * Rewrites a pull request body, which is how Renovate's control checkboxes are ticked.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param number The pull request number.
+   * @param body The new body.
+   */
+  public async setPrBody(owner: string, repo: string, number: number, body: string): Promise<void> {
+    await this.write('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
+      owner,
+      repo,
+      pull_number: number,
+      body,
+    }, owner);
+  }
+
+  /**
+   * Re-runs the failed jobs of a workflow run. Needs the Actions write permission, which the
+   * documented read-only setup does not have.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param runId The workflow run id.
+   */
+  public async rerunFailedJobs(owner: string, repo: string, runId: number): Promise<void> {
+    await this.write('POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs', {
+      owner,
+      repo,
+      run_id: runId,
+    }, owner);
+  }
+
+  // Writes never go through the ETag cache: a conditional write is meaningless, and caching a
+  // response that changed the world would be worse than useless.
+  private async write<T>(
+    route: string,
+    parameters: Record<string, unknown>,
+    owner: string,
+  ): Promise<T> {
+    const headers = { 'x-github-api-version': API_VERSION };
+    try {
+      const response = await this.clientFor(owner).request(route, { ...parameters, headers });
+      this.recordRateLimit(<Record<string, unknown>> response.headers);
+      return <T> <unknown> response.data;
+    } catch (error: unknown) {
+      const httpError = asHttpError(error);
+      if (httpError !== undefined) {
+        this.recordRateLimit(httpError.headers);
+      }
+      throw error;
+    }
   }
 
   // Every request naming an owner goes out with that owner's token when one is configured.

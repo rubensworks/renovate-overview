@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { formatAbsolute, formatRelative } from '../lib/time';
-import type { IRenovatePr } from '../lib/types';
+import type { ActionKind, IRenovatePr, ISettings } from '../lib/types';
 import { CHECK_STATE_LABELS } from '../lib/types';
+import { PrActions } from './pr-actions';
 import { StatusIcon } from './status-icon';
 import { UpdatePill } from './update-pill';
 
@@ -20,6 +21,10 @@ export interface IPrRowProps {
    * that says `lodash`.
    */
   focusKey?: string;
+  settings: ISettings;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  onAction: (kind: ActionKind, pr: IRenovatePr) => void;
 }
 
 /**
@@ -28,7 +33,7 @@ export interface IPrRowProps {
  * The dependency, not the title, is the headline: the title is a sentence about the dependency,
  * and a column of sentences is much harder to scan than a column of names.
  */
-export function PrRow({ pr, now, onExpand, focusKey }: IPrRowProps) {
+export function PrRow({ pr, now, onExpand, focusKey, settings, selected, onSelect, onAction }: IPrRowProps) {
   const [ open, setOpen ] = useState(false);
   const focused = pr.parse.updates.find(update => update.groupKey === focusKey);
   const first = focused ?? pr.parse.updates[0];
@@ -45,6 +50,13 @@ export function PrRow({ pr, now, onExpand, focusKey }: IPrRowProps) {
   return (
     <li className={`pr pr--${pr.checkState}`}>
       <div className="pr__line">
+        <input
+          className="pr__select"
+          type="checkbox"
+          checked={selected}
+          aria-label={`Select ${pr.repo} #${pr.number}`}
+          onChange={() => onSelect(pr.id)}
+        />
         <button
           className="pr__disclosure"
           type="button"
@@ -169,6 +181,8 @@ export function PrRow({ pr, now, onExpand, focusKey }: IPrRowProps) {
                       ))}
                     </ul>
                   )}
+
+              <PrActions pr={pr} settings={settings} onAction={onAction} />
 
               {pr.parse.disagreements.length === 0 ?
                 null :

@@ -4,7 +4,7 @@ import { Dashboard } from '../../src/components/dashboard';
 import type { DashboardStore } from '../../src/lib/store';
 import { INITIAL_STATE } from '../../src/lib/store';
 import type { IDashboardState } from '../../src/lib/types';
-import { pr } from '../fixtures';
+import { SETTINGS, pr } from '../fixtures';
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -22,6 +22,15 @@ afterEach(() => {
 class FakeStore {
   public readonly refresh = vi.fn(async() => {});
   public readonly loadBodies = vi.fn(async() => {});
+  public readonly runActions = vi.fn(async() => {});
+  public readonly clearActionRun = vi.fn();
+  public readonly setSelection = vi.fn((ids: string[]) => this.set({ selected: [ ...new Set(ids) ]}));
+  public readonly toggleSelection = vi.fn((id: string) => this.set({
+    selected: this.getSnapshot().selected.includes(id) ?
+      this.getSnapshot().selected.filter(entry => entry !== id) :
+        [ ...this.getSnapshot().selected, id ],
+  }));
+
   private readonly listeners = new Set<() => void>();
   private state: IDashboardState;
 
@@ -49,7 +58,7 @@ class FakeStore {
 function renderDashboard(state: Partial<IDashboardState> = {}, hash = ''): FakeStore {
   history.replaceState(null, '', `/${hash}`);
   const store = new FakeStore(state);
-  render(<Dashboard store={store as unknown as DashboardStore} />);
+  render(<Dashboard store={store as unknown as DashboardStore} settings={SETTINGS} />);
   return store;
 }
 
@@ -187,6 +196,106 @@ describe('Dashboard', () => {
       const store = renderDashboard({ prs: [ GREEN ]});
       fireEvent.click(screen.getByRole('button', { name: /Expand/u }));
       expect(store.loadBodies).toHaveBeenCalledWith([ 'g' ]);
+    });
+  });
+
+  describe('actions', () => {
+    const WRITABLE = { ...SETTINGS, writeActions: true };
+
+    function renderWritable(state: Partial<IDashboardState> = {}, hash = ''): FakeStore {
+      history.replaceState(null, '', `/${hash}`);
+      const store = new FakeStore(state);
+      render(<Dashboard store={store as unknown as DashboardStore} settings={WRITABLE} />);
+      return store;
+    }
+
+    it('selects a row, and shows the bulk bar once something is selected', () => {
+      const store = renderWritable({ prs: [ GREEN ]});
+      expect(screen.queryByText('1 selected')).toBeNull();
+      fireEvent.click(screen.getByLabelText('Select rubensworks/jbr.js #42'));
+      expect(store.toggleSelection).toHaveBeenCalledWith('g');
+      expect(screen.getByText('1 selected')).toBeDefined();
+    });
+
+    it('selects everything ready to merge in a group, from its header', () => {
+      const store = renderWritable({ prs: [ GREEN, RED ]}, '#g=repo');
+      fireEvent.click(screen.getAllByRole('button', { name: /Select 1 ready to merge/u })[0] as HTMLElement);
+      expect(store.setSelection).toHaveBeenCalledWith([ 'g' ]);
+    });
+
+    it('confirms before writing anything, naming the action and the count', () => {
+      const store = renderWritable({ prs: [ GREEN, RED ], selected: [ 'g', 'r' ]});
+      fireEvent.click(screen.getByRole('button', { name: 'Merge selected' }));
+
+      const dialog = screen.getByRole('dialog');
+      expect(dialog.textContent).toContain('Merge on 2 pull requests');
+      expect(dialog.textContent).toContain('rubensworks/jbr.js#42');
+      expect(store.runActions).not.toHaveBeenCalled();
+    });
+
+    it('runs the action once confirmed', () => {
+      const store = renderWritable({ prs: [ GREEN ], selected: [ 'g' ]});
+      fireEvent.click(screen.getByRole('button', { name: 'Approve selected' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+      expect(store.runActions).toHaveBeenCalledWith('approve', [ GREEN ]);
+    });
+
+    it('does nothing when the confirmation is cancelled', () => {
+      const store = renderWritable({ prs: [ GREEN ], selected: [ 'g' ]});
+      fireEvent.click(screen.getByRole('button', { name: 'Approve selected' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(store.runActions).not.toHaveBeenCalled();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('warns about what closing means to Renovate', () => {
+      renderWritable({ prs: [ GREEN ]});
+      fireEvent.click(screen.getByRole('button', { name: /Expand/u }));
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      expect(screen.getByRole('dialog').textContent).toContain('never offer this update again');
+    });
+
+    it('says a bulk merge is sequential and stops early', () => {
+      renderWritable({ prs: [ GREEN, RED ], selected: [ 'g', 'r' ]});
+      fireEvent.click(screen.getByRole('button', { name: 'Merge selected' }));
+      expect(screen.getByRole('dialog').textContent).toContain('one at a time');
+    });
+
+    it('summarises a long list rather than printing a wall of names', () => {
+      const many = Array.from({ length: 8 }, (_unused, index) =>
+        pr({ id: `p${index}`, number: index, repo: `o/r${index}` }));
+      renderWritable({ prs: many, selected: many.map(entry => entry.id) });
+      fireEvent.click(screen.getByRole('button', { name: 'Approve selected' }));
+      expect(screen.getByRole('dialog').textContent).toContain('and 3 more');
+    });
+
+    it('runs a per-pull-request action from the expanded row', () => {
+      const store = renderWritable({ prs: [ GREEN ]});
+      fireEvent.click(screen.getByRole('button', { name: /Expand/u }));
+      fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+      fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[1] as HTMLElement);
+      expect(store.runActions).toHaveBeenCalledWith('approve', [ GREEN ]);
+    });
+
+    it('shows the progress list while a run is going, and dismisses it after', () => {
+      const store = renderWritable({
+        prs: [ GREEN ],
+        actionRun: {
+          kind: 'merge',
+          results: [{ prId: 'g', label: 'o/r#1', outcome: 'succeeded', message: undefined }],
+          running: false,
+          stoppedReason: undefined,
+        },
+      });
+      expect(screen.getByText('o/r#1')).toBeDefined();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(store.clearActionRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the selection', () => {
+      const store = renderWritable({ prs: [ GREEN ], selected: [ 'g' ]});
+      fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+      expect(store.setSelection).toHaveBeenCalledWith([]);
     });
   });
 

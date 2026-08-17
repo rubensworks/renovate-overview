@@ -15,8 +15,10 @@ large backlog tractable.
 
 > **Status:** in development. Paste a token and you get the whole backlog: every open Renovate pull
 > request across your account and your organisations, grouped by dependency or by repository,
-> sorted and filtered however you like, with the view in the URL so you can bookmark it. The bulk
-> actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
+> sorted and filtered however you like, with the view in the URL so you can bookmark it. Turn on
+> write actions and you can merge, approve, rebase and close — per pull request or over a
+> selection. What is left is the polish described in [`CLAUDE.md`](CLAUDE.md): background polling,
+> favicon and title status, keyboard shortcuts and the mobile layout.
 
 ## How it works
 
@@ -84,7 +86,13 @@ grant only what you intend to use:
 - **Pull requests: Read and write** — approve, close, edit the body (the Renovate rebase checkbox),
   enable auto-merge.
 - **Contents: Read and write** — required to merge.
-- **Actions: Read and write** — only needed for "re-run failed jobs".
+- **Actions: Read and write** — only needed for "re-run failed jobs". Without it that button
+  simply is not offered.
+
+Every write goes through a confirmation naming exactly what it will do and to how many pull
+requests, and bulk actions run one at a time with a per-pull-request result list. A repository that
+forbids your merge method answers with a 405, which is reported against that pull request rather
+than stopping the rest.
 
 ### Where the token is stored
 

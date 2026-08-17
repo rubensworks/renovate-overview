@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { IPrRowProps } from '../../src/components/pr-row';
 import { PrRow } from '../../src/components/pr-row';
 import type { IRenovatePr } from '../../src/lib/types';
-import { pr } from '../fixtures';
+import { SETTINGS, pr } from '../fixtures';
 
 const GROUP_PARSE = {
   updates: [
@@ -20,8 +21,19 @@ afterEach(cleanup);
 
 const NOW = Date.parse('2026-08-17T12:00:00Z');
 
-function renderRow(overrides: Partial<IRenovatePr> = {}, onExpand = (): void => {}): void {
-  render(<PrRow pr={pr(overrides)} now={NOW} onExpand={onExpand} />);
+function renderRow(overrides: Partial<IRenovatePr> = {}, extra: Partial<IPrRowProps> = {}): void {
+  render(
+    <PrRow
+      pr={pr(overrides)}
+      now={NOW}
+      onExpand={() => {}}
+      settings={SETTINGS}
+      selected={false}
+      onSelect={() => {}}
+      onAction={() => {}}
+      {...extra}
+    />,
+  );
 }
 
 function expand(): void {
@@ -53,7 +65,7 @@ describe('PrRow', () => {
   });
 
   it('labels a group pull request with the dependency whose group it is being shown in', () => {
-    render(<PrRow pr={pr({ parse: GROUP_PARSE })} now={NOW} onExpand={() => {}} focusKey="types-node" />);
+    renderRow({ parse: GROUP_PARSE }, { focusKey: 'types-node' });
     expect(screen.getByText('@types/node')).toBeDefined();
     expect(screen.queryByText('lodash')).toBeNull();
     // Still says it carries more, whichever of them the row is filed under.
@@ -61,7 +73,7 @@ describe('PrRow', () => {
   });
 
   it('falls back to the first package when the group is not a dependency group', () => {
-    render(<PrRow pr={pr({ parse: GROUP_PARSE })} now={NOW} onExpand={() => {}} focusKey="something-else" />);
+    renderRow({ parse: GROUP_PARSE }, { focusKey: 'something-else' });
     expect(screen.getByText('lodash')).toBeDefined();
   });
 
@@ -82,7 +94,7 @@ describe('PrRow', () => {
   });
 
   it('shows just the new version when the current one is not known', () => {
-    const { container } = render(<PrRow pr={pr()} now={NOW} onExpand={() => {}} />);
+    const { container } = render(<PrRow pr={pr()} now={NOW} onExpand={() => {}} settings={SETTINGS} selected={false} onSelect={() => {}} onAction={() => {}} />);
     expect(container.querySelector('.pr__versions')?.textContent).toBe('→ 4.17.21');
   });
 
@@ -90,7 +102,7 @@ describe('PrRow', () => {
     renderRow({ parse: GROUP_PARSE });
     expect(screen.getByText('patch')).toBeDefined();
     cleanup();
-    const { container } = render(<PrRow pr={pr()} now={NOW} onExpand={() => {}} />);
+    const { container } = render(<PrRow pr={pr()} now={NOW} onExpand={() => {}} settings={SETTINGS} selected={false} onSelect={() => {}} onAction={() => {}} />);
     expect(container.querySelector('.pill')).toBeNull();
   });
 
@@ -102,13 +114,13 @@ describe('PrRow', () => {
   });
 
   it('carries its check state as a class, for the coloured rule down the margin', () => {
-    const { container } = render(<PrRow pr={pr({ checkState: 'failure' })} now={NOW} onExpand={() => {}} />);
-    expect(container.querySelector('.pr')?.classList.contains('pr--failure')).toBe(true);
+    renderRow({ checkState: 'failure' });
+    expect(document.querySelector('.pr')?.classList.contains('pr--failure')).toBe(true);
   });
 
   it('shows no flags on an ordinary green pull request', () => {
-    const { container } = render(<PrRow pr={pr()} now={NOW} onExpand={() => {}} />);
-    expect(container.querySelectorAll('.flag')).toHaveLength(0);
+    renderRow();
+    expect(document.querySelectorAll('.flag')).toHaveLength(0);
   });
 
   it('flags a draft, a conflict, a review decision and a private repository', () => {
@@ -145,7 +157,7 @@ describe('PrRow', () => {
 
   it('asks for the body the first time it is opened, and not again', () => {
     const onExpand = vi.fn();
-    renderRow({}, onExpand);
+    renderRow({}, { onExpand });
     expand();
     expect(onExpand).toHaveBeenCalledWith('PR_1');
     fireEvent.click(screen.getByRole('button', { name: /Collapse/u }));

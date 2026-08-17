@@ -1,7 +1,13 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GitHubClient } from '../src/lib/githubClient';
-import { BODY_BATCH_SIZE, MERGEABLE_RETRY_MS, DashboardStore, quotaRatio } from '../src/lib/store';
+import {
+  BODY_BATCH_SIZE,
+  MAX_CONSECUTIVE_FAILURES,
+  MERGEABLE_RETRY_MS,
+  DashboardStore,
+  quotaRatio,
+} from '../src/lib/store';
 import type { IGraphqlRateLimit, IOwnerToken, ISettings } from '../src/lib/types';
 import { SETTINGS, node, page } from './fixtures';
 
@@ -17,10 +23,41 @@ type GraphqlMock = Mock<(query: string, variables: Record<string, unknown>, owne
 interface IStubClient {
   graphql: GraphqlMock;
   graphqlRateLimit: IGraphqlRateLimit | undefined;
+  approvePr: Mock<() => Promise<void>>;
+  mergePr: Mock<() => Promise<void>>;
+  closePr: Mock<() => Promise<void>>;
+  getPrBody: Mock<() => Promise<string>>;
+  setPrBody: Mock<() => Promise<void>>;
+  rerunFailedJobs: Mock<() => Promise<void>>;
 }
 
+const approveMock: Mock<() => Promise<void>> = vi.fn();
+const getBodyMock: Mock<() => Promise<string>> = vi.fn();
+
 function stubClient(): IStubClient {
-  return { graphql: vi.fn(), graphqlRateLimit: QUOTA };
+  approveMock.mockReset();
+  approveMock.mockResolvedValue();
+  getBodyMock.mockReset();
+  getBodyMock.mockResolvedValue('');
+  return {
+    graphql: vi.fn(),
+    graphqlRateLimit: QUOTA,
+    approvePr: approveMock,
+    mergePr: vi.fn(async() => {}),
+    closePr: vi.fn(async() => {}),
+    getPrBody: getBodyMock,
+    setPrBody: vi.fn(async() => {}),
+    rerunFailedJobs: vi.fn(async() => {}),
+  };
+}
+
+class RateLimitError extends Error {
+  public readonly status = 429;
+  public readonly response = { headers: { 'retry-after': '30' }};
+}
+
+function rateLimited(): Error {
+  return new RateLimitError('slow down');
 }
 
 function makeStore(
@@ -63,6 +100,9 @@ describe('DashboardStore', () => {
       loading: false,
       error: undefined,
       bodyError: undefined,
+      selected: [],
+      droppedFromSelection: 0,
+      actionRun: undefined,
       totalCount: 0,
       rateLimit: undefined,
       lastRefreshedAt: undefined,
@@ -632,6 +672,276 @@ describe('DashboardStore', () => {
 
       const bodyCalls = client.graphql.mock.calls.filter(call => String(call[0]).includes('body'));
       expect(bodyCalls).toHaveLength(1);
+      store.dispose();
+    });
+  });
+
+  describe('selection', () => {
+    async function loaded(client: IStubClient): Promise<DashboardStore> {
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }), node({ id: 'B' }) ]));
+      const store = makeStore(client);
+      await store.refresh();
+      return store;
+    }
+
+    it('selects and deselects', async() => {
+      const store = await loaded(stubClient());
+      store.toggleSelection('A');
+      expect(store.getSnapshot().selected).toEqual([ 'A' ]);
+      store.toggleSelection('A');
+      expect(store.getSnapshot().selected).toEqual([]);
+      store.dispose();
+    });
+
+    it('ignores anything that is not on the list, and never selects one twice', async() => {
+      const store = await loaded(stubClient());
+      store.setSelection([ 'A', 'A', 'GONE' ]);
+      expect(store.getSnapshot().selected).toEqual([ 'A' ]);
+      store.dispose();
+    });
+
+    it('survives a refresh, and says how much of it did not', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      store.setSelection([ 'A', 'B' ]);
+
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      await store.refresh();
+
+      expect(store.getSnapshot().selected).toEqual([ 'A' ]);
+      expect(store.getSnapshot().droppedFromSelection).toBe(1);
+      store.dispose();
+    });
+
+    it('stops reporting a drop once the selection is touched again', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      store.setSelection([ 'A', 'B' ]);
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      await store.refresh();
+
+      store.setSelection([ 'A' ]);
+      expect(store.getSnapshot().droppedFromSelection).toBe(0);
+      store.dispose();
+    });
+  });
+
+  describe('runActions', () => {
+    async function loaded(client: IStubClient, ids = [ 'A', 'B' ]): Promise<DashboardStore> {
+      client.graphql.mockResolvedValue(page(ids.map(id => node({ id }))));
+      const store = makeStore(client);
+      await store.refresh();
+      client.graphql.mockReset();
+      client.graphql.mockResolvedValue({ nodes: []});
+      return store;
+    }
+
+    it('runs the action once per pull request and reports each result', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      const prs = store.getSnapshot().prs;
+
+      await store.runActions('approve', prs);
+
+      expect(approveMock).toHaveBeenCalledTimes(2);
+      const run = store.getSnapshot().actionRun;
+      expect(run?.kind).toBe('approve');
+      expect(run?.running).toBe(false);
+      expect(run?.results.map(result => result.outcome)).toEqual([ 'succeeded', 'succeeded' ]);
+      expect(run?.results[0]?.label).toBe('rubensworks/jbr.js#42');
+      store.dispose();
+    });
+
+    it('records a failure against its own pull request and carries on', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      approveMock.mockRejectedValueOnce(new Error('no permission'));
+
+      await store.runActions('approve', store.getSnapshot().prs);
+
+      const run = store.getSnapshot().actionRun;
+      expect(run?.results.map(result => result.outcome)).toEqual([ 'failed', 'succeeded' ]);
+      expect(run?.results[0]?.message).toBe('no permission');
+      expect(run?.stoppedReason).toBeUndefined();
+      store.dispose();
+    });
+
+    it('gives up after several failures in a row rather than hammering the API', async() => {
+      const client = stubClient();
+      const store = await loaded(client, [ 'A', 'B', 'C', 'D', 'E' ]);
+      approveMock.mockRejectedValue(new Error('no permission'));
+
+      await store.runActions('approve', store.getSnapshot().prs);
+
+      expect(approveMock).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      const run = store.getSnapshot().actionRun;
+      expect(run?.stoppedReason).toContain('failures in a row');
+      expect(run?.results.at(-1)?.outcome).toBe('pending');
+      store.dispose();
+    });
+
+    it('stops at once when GitHub asks it to slow down', async() => {
+      const client = stubClient();
+      const store = await loaded(client, [ 'A', 'B', 'C' ]);
+      approveMock.mockRejectedValue(rateLimited());
+
+      await store.runActions('approve', store.getSnapshot().prs);
+
+      expect(approveMock).toHaveBeenCalledTimes(1);
+      expect(store.getSnapshot().actionRun?.stoppedReason).toContain('slow down');
+      store.dispose();
+    });
+
+    it('does not count "nothing to do" as a failure', async() => {
+      const client = stubClient();
+      const store = await loaded(client, [ 'A', 'B', 'C', 'D' ]);
+      getBodyMock.mockResolvedValue('no checkbox at all');
+
+      await store.runActions('rebase', store.getSnapshot().prs);
+
+      const run = store.getSnapshot().actionRun;
+      expect(run?.results.map(result => result.outcome)).toEqual([ 'skipped', 'skipped', 'skipped', 'skipped' ]);
+      expect(run?.stoppedReason).toBeUndefined();
+      store.dispose();
+    });
+
+    it('re-reads only the pull requests it actually changed', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      client.graphql.mockResolvedValue({ nodes: [{
+        id: 'A',
+        state: 'OPEN',
+        updatedAt: '2026-08-17T00:00:00Z',
+        mergeable: 'CONFLICTING',
+        reviewDecision: 'APPROVED',
+      }]});
+
+      await store.runActions('approve', [ store.getSnapshot().prs[0]! ]);
+
+      const [ , variables ] = <[string, { ids: string[] }]> client.graphql.mock.calls[0];
+      expect(variables.ids).toEqual([ 'A' ]);
+      const refreshed = store.getSnapshot().prs.find(entry => entry.id === 'A');
+      expect(refreshed?.mergeable).toBe('CONFLICTING');
+      expect(refreshed?.reviewDecision).toBe('APPROVED');
+      store.dispose();
+    });
+
+    it('normalises whatever the re-read reports, and keeps what it does not mention', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      client.graphql.mockResolvedValue({ nodes: [
+        null,
+        {},
+        { id: 'A', state: 'OPEN', mergeable: 'SOMETHING_ELSE', reviewDecision: 'ODD' },
+      ]});
+
+      await store.runActions('approve', store.getSnapshot().prs);
+
+      const refreshed = store.getSnapshot().prs.find(entry => entry.id === 'A');
+      expect(refreshed?.mergeable).toBe('UNKNOWN');
+      expect(refreshed?.reviewDecision).toBeNull();
+      // No updatedAt came back, so the one already on hand stands.
+      expect(refreshed?.updatedAt).toBe('2026-08-10T10:00:00Z');
+      // 'B' was not mentioned at all, so it is left exactly as it was.
+      expect(store.getSnapshot().prs.find(entry => entry.id === 'B')).toBeDefined();
+      store.dispose();
+    });
+
+    it('reads every review decision it knows', async() => {
+      for (const decision of <const>[ 'APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED' ]) {
+        const client = stubClient();
+        const store = await loaded(client, [ 'A' ]);
+        client.graphql.mockResolvedValue({ nodes: [{ id: 'A', state: 'OPEN', reviewDecision: decision }]});
+        await store.runActions('approve', store.getSnapshot().prs);
+        expect(store.getSnapshot().prs[0]?.reviewDecision).toBe(decision);
+        store.dispose();
+      }
+    });
+
+    it('copes with a re-read that carries no nodes at all', async() => {
+      const client = stubClient();
+      const store = await loaded(client, [ 'A' ]);
+      client.graphql.mockResolvedValue({});
+      await store.runActions('approve', store.getSnapshot().prs);
+      expect(store.getSnapshot().prs).toHaveLength(1);
+      store.dispose();
+    });
+
+    it('drops a pull request that is no longer open', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      client.graphql.mockResolvedValue({ nodes: [{ id: 'A', state: 'MERGED' }]});
+
+      await store.runActions('merge', [ store.getSnapshot().prs[0]! ]);
+
+      expect(store.getSnapshot().prs.map(entry => entry.id)).toEqual([ 'B' ]);
+      store.dispose();
+    });
+
+    it('leaves rows alone when the re-read fails, since the writes already reported themselves', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      client.graphql.mockRejectedValue(new Error('refresh failed'));
+
+      await store.runActions('approve', [ store.getSnapshot().prs[0]! ]);
+
+      expect(store.getSnapshot().error).toBeUndefined();
+      expect(store.getSnapshot().prs).toHaveLength(2);
+      expect(store.getSnapshot().actionRun?.results[0]?.outcome).toBe('succeeded');
+      store.dispose();
+    });
+
+    it('re-reads nothing when nothing succeeded', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      approveMock.mockRejectedValue(new Error('no'));
+
+      await store.runActions('approve', store.getSnapshot().prs);
+      expect(client.graphql).not.toHaveBeenCalled();
+      store.dispose();
+    });
+
+    it('abandons a run whose store has been replaced partway through', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      approveMock.mockImplementationOnce(async() => {
+        store.dispose();
+      });
+
+      await store.runActions('approve', store.getSnapshot().prs);
+      expect(approveMock).toHaveBeenCalledTimes(1);
+      store.dispose();
+    });
+
+    it('does not re-read after a run whose store was replaced on its last pull request', async() => {
+      const client = stubClient();
+      const store = await loaded(client, [ 'A' ]);
+      approveMock.mockImplementationOnce(async() => {
+        store.dispose();
+      });
+
+      await store.runActions('approve', store.getSnapshot().prs);
+      expect(client.graphql).not.toHaveBeenCalled();
+    });
+
+    it('drops a re-read whose answer arrives after the store was replaced', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      client.graphql.mockImplementationOnce(async() => {
+        store.dispose();
+        return { nodes: [{ id: 'A', state: 'MERGED' }]};
+      });
+
+      await store.runActions('approve', [ store.getSnapshot().prs[0]! ]);
+      expect(store.getSnapshot().prs).toHaveLength(2);
+    });
+
+    it('forgets a finished run when asked', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      await store.runActions('approve', store.getSnapshot().prs);
+      store.clearActionRun();
+      expect(store.getSnapshot().actionRun).toBeUndefined();
       store.dispose();
     });
   });

@@ -126,6 +126,12 @@ describe('describeError', () => {
     expect(describeError(new HttpError(429))).toContain('slow down');
   });
 
+  it('explains the failures a write meets', () => {
+    expect(describeError(new HttpError(405))).toContain('forbid this merge method');
+    expect(describeError(new HttpError(409))).toContain('no longer mergeable');
+    expect(describeError(new HttpError(422, 'Review cannot be requested'))).toContain('Review cannot be requested');
+  });
+
   it('falls back to the status and message', () => {
     expect(describeError(new HttpError(500, 'kaboom'))).toBe('HTTP 500: kaboom');
   });
@@ -187,6 +193,90 @@ describe('GitHubClient', () => {
     it('propagates a rejection from a wrongly scoped token', async() => {
       requestMock.mockRejectedValue(new HttpError(403, 'Resource not accessible'));
       await expect(new GitHubClient('t').checkOrgAccess('comunica')).rejects.toThrow();
+    });
+  });
+
+  describe('writes', () => {
+    beforeEach(() => {
+      requestMock.mockResolvedValue(response({}));
+    });
+
+    it('merges with the given method', async() => {
+      await new GitHubClient('t').mergePr('o', 'r', 7, 'squash');
+      expect(requestMock).toHaveBeenCalledWith(
+        'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge',
+        containing({ owner: 'o', repo: 'r', pull_number: 7, merge_method: 'squash' }),
+      );
+    });
+
+    it('approves', async() => {
+      await new GitHubClient('t').approvePr('o', 'r', 7);
+      expect(requestMock).toHaveBeenCalledWith(
+        'POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews',
+        containing({ event: 'APPROVE' }),
+      );
+    });
+
+    it('closes', async() => {
+      await new GitHubClient('t').closePr('o', 'r', 7);
+      expect(requestMock).toHaveBeenCalledWith(
+        'PATCH /repos/{owner}/{repo}/pulls/{pull_number}',
+        containing({ state: 'closed' }),
+      );
+    });
+
+    it('reads a body, treating a null one as empty', async() => {
+      requestMock.mockResolvedValue(response({ body: 'hello' }));
+      await expect(new GitHubClient('t').getPrBody('o', 'r', 7)).resolves.toBe('hello');
+      requestMock.mockResolvedValue(response({ body: null }));
+      await expect(new GitHubClient('t').getPrBody('o', 'r', 7)).resolves.toBe('');
+    });
+
+    it('writes a body back', async() => {
+      await new GitHubClient('t').setPrBody('o', 'r', 7, 'new body');
+      expect(requestMock).toHaveBeenCalledWith(
+        'PATCH /repos/{owner}/{repo}/pulls/{pull_number}',
+        containing({ body: 'new body' }),
+      );
+    });
+
+    it('re-runs failed jobs', async() => {
+      await new GitHubClient('t').rerunFailedJobs('o', 'r', 99);
+      expect(requestMock).toHaveBeenCalledWith(
+        'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs',
+        containing({ run_id: 99 }),
+      );
+    });
+
+    it('never sends a conditional header on a write, however often it is repeated', async() => {
+      requestMock.mockResolvedValue(response({}, { etag: 'W/"1"' }));
+      const client = new GitHubClient('t');
+      await client.closePr('o', 'r', 7);
+      await client.closePr('o', 'r', 7);
+      expect(requestMock).toHaveBeenLastCalledWith('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', containing({
+        headers: notContaining({ 'if-none-match': <unknown> expect.anything() }),
+      }));
+    });
+
+    it('uses the organisation token for that organisation', async() => {
+      const client = new GitHubClient('main', [{ owner: 'comunica', token: 'org' }]);
+      await client.mergePr('Comunica', 'comunica', 1, 'merge');
+      expect(constructorMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('records the quota a write reports, and the one a failure reports', async() => {
+      const client = new GitHubClient('t');
+      await client.closePr('o', 'r', 7);
+      expect(client.rateLimit).toEqual({ limit: 5000, remaining: 4999, reset: 1_700_000_000 });
+
+      requestMock.mockRejectedValue(new HttpError(403, 'nope'));
+      await expect(client.closePr('o', 'r', 7)).rejects.toThrow();
+      expect(client.rateLimit).not.toBeUndefined();
+    });
+
+    it('propagates a failure so the queue can report it', async() => {
+      requestMock.mockRejectedValue(new Error('offline'));
+      await expect(new GitHubClient('t').mergePr('o', 'r', 7, 'merge')).rejects.toThrow('offline');
     });
   });
 

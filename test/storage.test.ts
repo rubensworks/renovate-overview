@@ -22,6 +22,8 @@ const CUSTOM: ISettings = {
   extraAuthors: [ 'my-renovate' ],
   includeDependabot: true,
   writeActions: true,
+  mergeMethod: 'rebase',
+  repoMergeMethods: { 'rubensworks/jbr.js': 'merge' },
   theme: 'light',
 };
 
@@ -235,6 +237,22 @@ describe('loadSettings', () => {
     expect(loadSettings().writeActions).toBe(false);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ writeActions: true }));
     expect(loadSettings().writeActions).toBe(true);
+  });
+
+  it('keeps only the per-repository merge methods it understands', () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      mergeMethod: 'nonsense',
+      repoMergeMethods: { 'a/b': 'rebase', 'c/d': 'teleport', 'e/f': 7 },
+    }));
+    expect(loadSettings().mergeMethod).toBe(DEFAULT_SETTINGS.mergeMethod);
+    expect(loadSettings().repoMergeMethods).toEqual({ 'a/b': 'rebase' });
+  });
+
+  it('ignores per-repository merge methods that are not an object at all', () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ repoMergeMethods: 'nope' }));
+    expect(loadSettings().repoMergeMethods).toEqual({});
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ repoMergeMethods: null }));
+    expect(loadSettings().repoMergeMethods).toEqual({});
   });
 
   it('accepts every theme it knows', () => {

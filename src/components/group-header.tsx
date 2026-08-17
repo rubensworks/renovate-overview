@@ -6,13 +6,18 @@ export interface IGroupHeaderProps {
   group: IGroup;
   collapsed: boolean;
   onToggle: (key: string) => void;
+  /**
+   * Adds pull requests to the selection. The green-only shortcut is the single most useful thing
+   * on this header: it is what turns a dependency group into one merge.
+   */
+  onSelect: (ids: string[]) => void;
 }
 
 /**
  * A group's heading, carrying the roll-up that makes a backlog readable: how many pull requests
  * are in it, and how they split between passing, failing and still running.
  */
-export function GroupHeader({ group, collapsed, onToggle }: IGroupHeaderProps) {
+export function GroupHeader({ group, collapsed, onToggle, onSelect }: IGroupHeaderProps) {
   const green = greenIn(group.prs).length;
   return (
     <div className={`group__header group__header--${group.worst}`}>
@@ -38,7 +43,24 @@ export function GroupHeader({ group, collapsed, onToggle }: IGroupHeaderProps) {
         {group.counts.none > 0 ? <span className="tally tally--none">{group.counts.none} unchecked</span> : null}
       </span>
       <span className="group__spacer" />
-      {green > 0 ? <span className="group__green">{green} ready to merge</span> : null}
+      <button
+        className="button button--ghost"
+        type="button"
+        onClick={() => onSelect(group.prs.map(pr => pr.id))}
+      >
+        Select all
+      </button>
+      {green > 0 ?
+          (
+            <button
+              className="button button--ghost group__green"
+              type="button"
+              onClick={() => onSelect(greenIn(group.prs).map(pr => pr.id))}
+            >
+              Select {green} ready to merge
+            </button>
+          ) :
+        null}
     </div>
   );
 }

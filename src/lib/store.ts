@@ -1,3 +1,4 @@
+import { NothingToDoError, backoffFor, runAction } from './actions';
 import type { GitHubClient } from './githubClient';
 import { describeError } from './githubClient';
 import { resolveUpdates } from './renovate/resolve';
@@ -17,6 +18,8 @@ import {
   splitScope,
 } from './search';
 import type {
+  ActionKind,
+  IActionResult,
   IDashboardState,
   IGraphqlRateLimit,
   IOwnerToken,
@@ -44,11 +47,23 @@ const MAX_PAGES = 40;
  */
 export const BODY_BATCH_SIZE = 10;
 
+/**
+ * How many failures in a row before the queue gives up.
+ *
+ * A bulk merge that is failing on every pull request is failing for a reason that the next one
+ * will hit too — a missing permission, a branch protection rule — and hammering the API with the
+ * rest of the list helps nobody.
+ */
+export const MAX_CONSECUTIVE_FAILURES = 3;
+
 export const INITIAL_STATE: IDashboardState = {
   prs: [],
   loading: false,
   error: undefined,
   bodyError: undefined,
+  selected: [],
+  droppedFromSelection: 0,
+  actionRun: undefined,
   totalCount: 0,
   rateLimit: undefined,
   lastRefreshedAt: undefined,
@@ -78,6 +93,28 @@ interface IBodyNode {
 interface IBodyResponse {
   nodes?: (IBodyNode | null)[] | null;
 }
+
+interface IRefreshNode {
+  id?: string;
+  state?: string | null;
+  updatedAt?: string;
+  mergeable?: string | null;
+  reviewDecision?: string | null;
+}
+
+interface IRefreshResponse {
+  nodes?: (IRefreshNode | null)[] | null;
+}
+
+/**
+ * Re-reads the handful of fields a write can change, for the pull requests a write touched.
+ */
+const REFRESH_QUERY = `query($ids: [ID!]!) {
+  rateLimit { limit cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on PullRequest { id state updatedAt mergeable reviewDecision }
+  }
+}`;
 
 /**
  * Owns the pull request data and exposes an immutable snapshot for `useSyncExternalStore`.
@@ -200,8 +237,13 @@ export class DashboardStore {
       return;
     }
 
+    const prs = mergePrs(groups);
+    const alive = new Set(prs.map(pr => pr.id));
+    const keptSelection = this.state.selected.filter(id => alive.has(id));
     this.patch({
-      prs: mergePrs(groups),
+      prs,
+      selected: keptSelection,
+      droppedFromSelection: this.state.selected.length - keptSelection.length,
       loading: false,
       totalCount,
       truncated,
@@ -373,6 +415,165 @@ export class DashboardStore {
         const parse = parses.get(pr.id);
         return { ...pr, parse: parse ?? pr.parse, bodyLoaded: true };
       }),
+    });
+  }
+
+  /**
+   * Replaces the selection.
+   * @param ids The pull request ids to select.
+   */
+  public setSelection(ids: string[]): void {
+    const known = new Set(this.state.prs.map(pr => pr.id));
+    this.patch({ selected: [ ...new Set(ids) ].filter(id => known.has(id)), droppedFromSelection: 0 });
+  }
+
+  /**
+   * Adds or removes one pull request from the selection.
+   * @param id A pull request id.
+   */
+  public toggleSelection(id: string): void {
+    const selected = this.state.selected.includes(id) ?
+      this.state.selected.filter(entry => entry !== id) :
+        [ ...this.state.selected, id ];
+    this.setSelection(selected);
+  }
+
+  /**
+   * Forgets the last action's progress list.
+   */
+  public clearActionRun(): void {
+    this.patch({ actionRun: undefined });
+  }
+
+  /**
+   * Runs one action over some pull requests, one at a time.
+   *
+   * Sequential on purpose: GitHub's secondary rate limits punish concurrent writes to the same
+   * repository, and a queue that stops after a few failures is far kinder than one that works
+   * through two hundred pull requests failing the same way.
+   * @param kind The action.
+   * @param prs The pull requests to act on, in the order they should be attempted.
+   */
+  public async runActions(kind: ActionKind, prs: IRenovatePr[]): Promise<void> {
+    const generation = this.generation;
+    // Each pull request is paired with its own result object, which is then updated in place —
+    // indexing back into the list would need a bounds check that could never fail.
+    const queue = prs.map(pr => ({
+      pr,
+      result: <IActionResult>{
+        prId: pr.id,
+        label: `${pr.repo}#${pr.number}`,
+        outcome: 'pending',
+        message: undefined,
+      },
+    }));
+    const results = queue.map(entry => entry.result);
+    this.patch({ actionRun: { kind, results, running: true, stoppedReason: undefined }});
+
+    const touched: IRenovatePr[] = [];
+    let consecutiveFailures = 0;
+    let stoppedReason: string | undefined;
+
+    for (const [ index, { pr, result }] of queue.entries()) {
+      if (this.generation !== generation) {
+        return;
+      }
+      this.updateResult(kind, results, result, { outcome: 'running' });
+      try {
+        await runAction(this.client, kind, pr, this.settings);
+        consecutiveFailures = 0;
+        touched.push(pr);
+        this.updateResult(kind, results, result, { outcome: 'succeeded' });
+      } catch (error: unknown) {
+        // Nothing to do is not a failure, and must not count towards giving up.
+        if (error instanceof NothingToDoError) {
+          this.updateResult(kind, results, result, { outcome: 'skipped', message: error.message });
+          continue;
+        }
+        consecutiveFailures += 1;
+        this.updateResult(kind, results, result, { outcome: 'failed', message: describeError(error) });
+
+        const backoff = backoffFor(error);
+        if (backoff !== undefined) {
+          stoppedReason = `GitHub asked us to slow down; stopped after ${index + 1} of ${prs.length}`;
+          break;
+        }
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          stoppedReason =
+            `Stopped after ${MAX_CONSECUTIVE_FAILURES} failures in a row — something is wrong for all of them`;
+          break;
+        }
+      }
+    }
+
+    if (this.generation !== generation) {
+      return;
+    }
+    this.patch({ actionRun: { kind, results, running: false, stoppedReason }});
+    // Only the pull requests that actually changed are re-read, rather than the whole search.
+    await this.refreshPrs(touched, generation);
+  }
+
+  // A write changes one pull request, so one small query brings it back up to date. Re-running
+  // the whole search would cost far more and would still lag the index by a few seconds.
+  private async refreshPrs(prs: IRenovatePr[], generation: number): Promise<void> {
+    if (prs.length === 0) {
+      return;
+    }
+    try {
+      const response = await this.client.graphql<IRefreshResponse>(
+        REFRESH_QUERY,
+        { ids: prs.map(pr => pr.id) },
+      );
+      if (this.generation !== generation) {
+        return;
+      }
+      const fresh = new Map<string, IRefreshNode>();
+      for (const node of response.nodes ?? []) {
+        if (node?.id !== undefined) {
+          fresh.set(node.id, node);
+        }
+      }
+      this.patch({
+        prs: this.state.prs
+          // A pull request that has been merged or closed is no longer part of the backlog.
+          .filter(pr => fresh.get(pr.id)?.state === undefined || fresh.get(pr.id)?.state === 'OPEN')
+          .map((pr) => {
+            const node = fresh.get(pr.id);
+            if (node === undefined) {
+              return pr;
+            }
+            return {
+              ...pr,
+              updatedAt: node.updatedAt ?? pr.updatedAt,
+              mergeable: node.mergeable === 'MERGEABLE' || node.mergeable === 'CONFLICTING' ?
+                node.mergeable :
+                'UNKNOWN',
+              reviewDecision: node.reviewDecision === 'APPROVED' ||
+                node.reviewDecision === 'CHANGES_REQUESTED' ||
+                node.reviewDecision === 'REVIEW_REQUIRED' ?
+                node.reviewDecision :
+                null,
+            };
+          }),
+        rateLimit: this.client.graphqlRateLimit,
+      });
+      this.setSelection(this.state.selected);
+    } catch {
+      // The writes themselves already reported their own outcome; a stale row is a small price
+      // next to an error message about a refresh nobody asked for.
+    }
+  }
+
+  private updateResult(
+    kind: ActionKind,
+    results: IActionResult[],
+    result: IActionResult,
+    patch: Partial<IActionResult>,
+  ): void {
+    Object.assign(result, patch);
+    this.patch({
+      actionRun: { kind, results: results.map(entry => ({ ...entry })), running: true, stoppedReason: undefined },
     });
   }
 

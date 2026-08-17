@@ -916,3 +916,159 @@ code {
   margin: 0;
   color: var(--pending);
 }
+
+/* ------------------------------------------------------------- selection */
+
+.pr__select {
+  margin: 0;
+  cursor: pointer;
+}
+
+.bulk {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.bulk__count {
+  font-size: 12px;
+}
+
+.bulk__dropped {
+  color: var(--pending);
+  font-size: 12px;
+}
+
+.bulk__readonly {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.bulk__spacer {
+  flex: 1 1 auto;
+}
+
+.pr__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+}
+
+.pr__readonly {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-faint);
+}
+
+/* -------------------------------------------------------------- progress */
+
+.progress {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  font-size: 12px;
+}
+
+.progress__head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.progress__count {
+  color: var(--text-muted);
+}
+
+.progress__spacer {
+  flex: 1 1 auto;
+}
+
+.progress__stopped {
+  margin: 6px 0 0;
+  color: var(--failure);
+}
+
+.progress__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.progress__item {
+  display: flex;
+  gap: 8px;
+}
+
+.progress__glyph {
+  width: 12px;
+  text-align: center;
+}
+
+.progress__item--succeeded .progress__glyph { color: var(--success); }
+.progress__item--failed .progress__glyph { color: var(--failure); }
+.progress__item--running .progress__glyph { color: var(--pending); }
+.progress__item--pending,
+.progress__item--skipped { color: var(--text-faint); }
+
+.progress__message {
+  color: var(--failure);
+}
+
+.progress__item--skipped .progress__message {
+  color: var(--text-faint);
+}
+
+/* ----------------------------------------------------------------- modal */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(1 4 9 / 60%);
+  z-index: 10;
+}
+
+.modal__box {
+  width: 100%;
+  max-width: 480px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.modal__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.modal__detail p {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.modal__warning {
+  color: var(--pending) !important;
+}
+
+.modal__buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}

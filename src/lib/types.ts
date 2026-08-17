@@ -42,6 +42,66 @@ export interface IOwnerToken {
   token: string;
 }
 
+/**
+ * How a pull request is merged. Repositories can forbid any of the three, which is why it is
+ * configurable and overridable per repository.
+ */
+export type MergeMethod = 'merge' | 'rebase' | 'squash';
+
+export const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
+  merge: 'Merge commit',
+  squash: 'Squash and merge',
+  rebase: 'Rebase and merge',
+};
+
+/**
+ * A write the dashboard can perform on a pull request.
+ */
+export type ActionKind = 'approve' | 'auto-merge' | 'close' | 'merge' | 'rebase' | 'rerun';
+
+export const ACTION_LABELS: Record<ActionKind, string> = {
+  merge: 'Merge',
+  'auto-merge': 'Enable auto-merge',
+  approve: 'Approve',
+  rebase: 'Ask Renovate to rebase',
+  close: 'Close',
+  rerun: 'Re-run failed jobs',
+};
+
+/**
+ * Actions that can be run over a selection. Closing is deliberately absent: Renovate reads a
+ * closed pull request as "never offer this update again", which is too big a thing to do in bulk.
+ */
+export const BULK_ACTIONS: ActionKind[] = [ 'merge', 'auto-merge', 'approve', 'rebase' ];
+
+export type ActionOutcome = 'failed' | 'pending' | 'running' | 'skipped' | 'succeeded';
+
+export interface IActionResult {
+  prId: string;
+  /**
+   * `owner/repo#number`, so a result still reads sensibly after the pull request has gone.
+   */
+  label: string;
+  outcome: ActionOutcome;
+  message: string | undefined;
+}
+
+/**
+ * A run of one action over one or more pull requests.
+ */
+export interface IActionRun {
+  kind: ActionKind;
+  results: IActionResult[];
+  /**
+   * Whether the queue is still working through the list.
+   */
+  running: boolean;
+  /**
+   * Set when the queue gave up early rather than finishing the list.
+   */
+  stoppedReason: string | undefined;
+}
+
 export interface ISettings {
   /**
    * Organisations whose Renovate pull requests are pulled in, alongside the viewer's own.
@@ -61,6 +121,15 @@ export interface ISettings {
    * otherwise, so a token with no write permissions is a complete first-run experience.
    */
   writeActions: boolean;
+  /**
+   * How to merge, unless {@link repoMergeMethods} overrides it for the repository in hand.
+   */
+  mergeMethod: MergeMethod;
+  /**
+   * Per-repository merge methods, keyed by lowercased `owner/repo`, remembered after a repository
+   * refuses the default one.
+   */
+  repoMergeMethods: Record<string, MergeMethod>;
   theme: Theme;
 }
 
@@ -176,6 +245,20 @@ export interface IDashboardState {
    * still perfectly usable when only the dependency details could not be loaded.
    */
   bodyError: string | undefined;
+  /**
+   * The ids of the selected pull requests. Kept here rather than in a component so a refresh
+   * cannot silently lose it.
+   */
+  selected: string[];
+  /**
+   * Selected pull requests that disappeared from the last refresh, so the user is told rather
+   * than left wondering why the count dropped.
+   */
+  droppedFromSelection: number;
+  /**
+   * The action currently running, or the last one that ran.
+   */
+  actionRun: IActionRun | undefined;
   rateLimit: IGraphqlRateLimit | undefined;
   lastRefreshedAt: number | undefined;
   /**

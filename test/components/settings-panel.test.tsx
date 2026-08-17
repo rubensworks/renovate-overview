@@ -11,6 +11,8 @@ const SETTINGS: ISettings = {
   extraAuthors: [],
   includeDependabot: false,
   writeActions: false,
+  mergeMethod: 'squash',
+  repoMergeMethods: {},
   theme: 'auto',
 };
 
@@ -123,6 +125,15 @@ describe('SettingsPanel', () => {
   it('says nothing about write permissions while the app is read-only', () => {
     renderPanel();
     expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('offers a merge method only once the write actions are on', () => {
+    renderPanel();
+    expect(screen.queryByLabelText('Merge with')).toBeNull();
+    cleanup();
+    const harness = renderPanel({}, { ...SETTINGS, writeActions: true });
+    fireEvent.change(screen.getByLabelText('Merge with'), { target: { value: 'rebase' }});
+    expect(harness.changes.at(-1)?.mergeMethod).toBe('rebase');
   });
 
   it('names the write permissions once the actions are on', () => {

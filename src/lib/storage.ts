@@ -1,4 +1,4 @@
-import type { IOwnerToken, ISettings, Theme, TokenLocation } from './types';
+import type { IOwnerToken, ISettings, MergeMethod, Theme, TokenLocation } from './types';
 
 const TOKEN_KEY = 'renovate-overview:token';
 const OWNER_TOKENS_KEY = 'renovate-overview:owner-tokens';
@@ -10,6 +10,8 @@ export const DEFAULT_SETTINGS: ISettings = {
   includeDependabot: false,
   // Write actions stay off until asked for, so a read-only token is never met with dead buttons.
   writeActions: false,
+  mergeMethod: 'squash',
+  repoMergeMethods: {},
   theme: 'auto',
 };
 
@@ -141,6 +143,24 @@ function toStringArray(value: unknown): string[] | undefined {
   return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
+function toMergeMethod(value: unknown): MergeMethod | undefined {
+  return value === 'merge' || value === 'squash' || value === 'rebase' ? value : undefined;
+}
+
+function toMergeMethods(value: unknown): Record<string, MergeMethod> | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const methods: Record<string, MergeMethod> = {};
+  for (const [ repo, method ] of Object.entries(<Record<string, unknown>> value)) {
+    const parsed = toMergeMethod(method);
+    if (parsed !== undefined) {
+      methods[repo] = parsed;
+    }
+  }
+  return methods;
+}
+
 function toTheme(value: unknown): Theme | undefined {
   return value === 'auto' || value === 'dark' || value === 'light' ? value : undefined;
 }
@@ -170,6 +190,8 @@ export function loadSettings(): ISettings {
     // Anything other than an explicit `true` leaves the app read-only, so a corrupted or
     // hand-edited settings blob can never switch the write actions on by accident.
     writeActions: record.writeActions === true,
+    mergeMethod: toMergeMethod(record.mergeMethod) ?? DEFAULT_SETTINGS.mergeMethod,
+    repoMergeMethods: toMergeMethods(record.repoMergeMethods) ?? DEFAULT_SETTINGS.repoMergeMethods,
     theme: toTheme(record.theme) ?? DEFAULT_SETTINGS.theme,
   };
 }

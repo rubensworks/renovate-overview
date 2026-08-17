@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TOKEN_URL } from '../lib/links';
-import type { IOwnerToken, ISettings, Theme, TokenLocation } from '../lib/types';
-import { DEFAULT_RENOVATE_AUTHORS } from '../lib/types';
+import type { IOwnerToken, ISettings, MergeMethod, Theme, TokenLocation } from '../lib/types';
+import { DEFAULT_RENOVATE_AUTHORS, MERGE_METHOD_LABELS } from '../lib/types';
 
 export interface ISettingsPanelProps {
   settings: ISettings;
@@ -168,6 +168,27 @@ export function SettingsPanel(props: ISettingsPanelProps) {
             read-only, and leaving this off means nothing here can change anything.
           </span>
         </label>
+        {settings.writeActions ?
+            (
+              <div className="settings__field">
+                <label className="settings__label" htmlFor="settings-merge-method">Merge with</label>
+                <select
+                  id="settings-merge-method"
+                  className="settings__select"
+                  value={settings.mergeMethod}
+                  onChange={event => onChange({ ...settings, mergeMethod: event.target.value as MergeMethod })}
+                >
+                  {Object.entries(MERGE_METHOD_LABELS).map(([ value, label ]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <span className="settings__hint">
+                  A repository that forbids this method answers with a 405, which is reported
+                  against that pull request rather than stopping the rest.
+                </span>
+              </div>
+            ) :
+          null}
         {settings.writeActions ?
             (
               <p className="settings__warning" role="status">
