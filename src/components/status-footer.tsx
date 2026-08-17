@@ -11,16 +11,30 @@ export interface IStatusFooterProps {
  * The status bar: what the dashboard is doing, what went wrong, and what quota is left.
  */
 export function StatusFooter({ state, now }: IStatusFooterProps) {
-  const { rateLimit } = state;
+  const { rateLimit, restRateLimit } = state;
   const ratio = quotaRatio(rateLimit);
   const level = ratio > 0.25 ? 'ok' : (ratio > 0.05 ? 'warn' : 'low');
+  const holdUntil = state.backoffUntil;
+
+  let polling = 'Polling';
+  let dot = 'idle';
+  if (state.loading) {
+    polling = `Loading… ${state.prs.length} so far`;
+    dot = 'busy';
+  } else if (state.paused) {
+    polling = 'Paused — tab is hidden';
+    dot = 'paused';
+  } else if (holdUntil !== undefined && holdUntil > now) {
+    polling = `${state.backoffReason ?? 'Backing off'} (${formatUntil(new Date(holdUntil).toISOString(), now)})`;
+    dot = 'paused';
+  } else {
+    polling = `${state.prs.length} open`;
+  }
 
   return (
     <div className="status">
-      <span className={`status__dot status__dot--${state.loading ? 'busy' : 'idle'}`} />
-      <span className="status__item">
-        {state.loading ? `Loading… ${state.prs.length} so far` : `${state.prs.length} open`}
-      </span>
+      <span className={`status__dot status__dot--${dot}`} />
+      <span className="status__item">{polling}</span>
 
       {state.lastRefreshedAt === undefined ?
         null :
@@ -51,6 +65,9 @@ export function StatusFooter({ state, now }: IStatusFooterProps) {
               </span>
               {rateLimit.remaining}/{rateLimit.limit} GraphQL points · last query cost{' '}
               {rateLimit.cost} · resets in {formatUntil(rateLimit.resetAt, now)}
+              {restRateLimit === undefined ?
+                null :
+                <> · {restRateLimit.remaining}/{restRateLimit.limit} REST</>}
             </span>
           )}
     </div>

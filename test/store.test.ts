@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GitHubClient } from '../src/lib/githubClient';
 import {
   BODY_BATCH_SIZE,
+  IDLE_POLL_MS,
+  PENDING_POLL_MS,
+  TICK_MS,
   MAX_CONSECUTIVE_FAILURES,
   MERGEABLE_RETRY_MS,
   DashboardStore,
@@ -25,6 +28,8 @@ interface IStubClient {
   graphqlRateLimit: IGraphqlRateLimit | undefined;
   approvePr: Mock<() => Promise<void>>;
   mergePr: Mock<() => Promise<void>>;
+  getCheckRuns: Mock<() => Promise<{ runs: unknown[]; notModified: boolean }>>;
+  rateLimit: { limit: number; remaining: number; reset: number } | undefined;
   closePr: Mock<() => Promise<void>>;
   getPrBody: Mock<() => Promise<string>>;
   setPrBody: Mock<() => Promise<void>>;
@@ -32,6 +37,7 @@ interface IStubClient {
 }
 
 const approveMock: Mock<() => Promise<void>> = vi.fn();
+const checksMock: Mock<() => Promise<{ runs: unknown[]; notModified: boolean }>> = vi.fn();
 const getBodyMock: Mock<() => Promise<string>> = vi.fn();
 
 function stubClient(): IStubClient {
@@ -39,9 +45,13 @@ function stubClient(): IStubClient {
   approveMock.mockResolvedValue();
   getBodyMock.mockReset();
   getBodyMock.mockResolvedValue('');
+  checksMock.mockReset();
+  checksMock.mockResolvedValue({ runs: [], notModified: true });
   return {
     graphql: vi.fn(),
     graphqlRateLimit: QUOTA,
+    rateLimit: { limit: 5000, remaining: 4900, reset: 1_700_000_000 },
+    getCheckRuns: checksMock,
     approvePr: approveMock,
     mergePr: vi.fn(async() => {}),
     closePr: vi.fn(async() => {}),
@@ -49,6 +59,20 @@ function stubClient(): IStubClient {
     setPrBody: vi.fn(async() => {}),
     rerunFailedJobs: vi.fn(async() => {}),
   };
+}
+
+function hide(hidden: boolean): void {
+  Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+class NotAllowedError extends Error {
+  public readonly status = 405;
+  public readonly response = { headers: {}};
+}
+
+function notAllowed(): Error {
+  return new NotAllowedError('method not allowed');
 }
 
 class RateLimitError extends Error {
@@ -103,6 +127,10 @@ describe('DashboardStore', () => {
       selected: [],
       droppedFromSelection: 0,
       actionRun: undefined,
+      restRateLimit: undefined,
+      paused: false,
+      backoffUntil: undefined,
+      backoffReason: undefined,
       totalCount: 0,
       rateLimit: undefined,
       lastRefreshedAt: undefined,
@@ -942,6 +970,313 @@ describe('DashboardStore', () => {
       await store.runActions('approve', store.getSnapshot().prs);
       store.clearActionRun();
       expect(store.getSnapshot().actionRun).toBeUndefined();
+      store.dispose();
+    });
+  });
+
+  describe('polling', () => {
+    async function started(client: IStubClient, prNodes = [ node({ id: 'A' }) ]): Promise<DashboardStore> {
+      client.graphql.mockResolvedValue(page(prNodes));
+      const store = makeStore(client);
+      await store.refresh();
+      store.start();
+      return store;
+    }
+
+    it('re-runs the whole search once the idle interval has passed', async() => {
+      const client = stubClient();
+      const store = await started(client);
+      const before = client.graphql.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS + TICK_MS);
+      expect(client.graphql.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('does nothing at all before then', async() => {
+      const client = stubClient();
+      const store = await started(client);
+      const before = client.graphql.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(TICK_MS * 5);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      store.dispose();
+    });
+
+    it('re-reads a pending pull request over REST, far more often than the whole search', async() => {
+      const client = stubClient();
+      const store = await started(client, [ node({ id: 'A', commits: { nodes: [{ commit: {
+        oid: 'sha1',
+        statusCheckRollup: { state: 'PENDING', contexts: { totalCount: 0, nodes: []}},
+      }}]}}) ]);
+
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS + TICK_MS);
+      expect(checksMock).toHaveBeenCalled();
+      store.dispose();
+    });
+
+    it('leaves settled pull requests alone', async() => {
+      const client = stubClient();
+      const store = await started(client);
+
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS * 2);
+      expect(checksMock).not.toHaveBeenCalled();
+      store.dispose();
+    });
+
+    it('does not poll while the tab is hidden', async() => {
+      const client = stubClient();
+      const store = await started(client);
+      const before = client.graphql.mock.calls.length;
+
+      hide(true);
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 2);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      expect(store.getSnapshot().paused).toBe(true);
+
+      hide(false);
+      await vi.advanceTimersByTimeAsync(TICK_MS * 2);
+      expect(client.graphql.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('slows down as the quota drains, and stops short of spending it all', async() => {
+      const client = stubClient();
+      client.graphqlRateLimit = { ...QUOTA, remaining: 10 };
+      const store = await started(client);
+      const before = client.graphql.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 2);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      expect(store.getSnapshot().backoffReason).toContain('quota nearly spent');
+      store.dispose();
+    });
+
+    it('polls less often, rather than not at all, on a merely low quota', async() => {
+      const client = stubClient();
+      client.graphqlRateLimit = { ...QUOTA, remaining: 400 };
+      const store = await started(client);
+      const before = client.graphql.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 2);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 4);
+      expect(client.graphql.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('starting twice does not start twice', async() => {
+      const client = stubClient();
+      const store = await started(client);
+      store.start();
+      const before = client.graphql.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS + TICK_MS);
+      expect(client.graphql.mock.calls.length).toBe(before + 1);
+      store.dispose();
+    });
+
+    it('stops polling once disposed', async() => {
+      const client = stubClient();
+      const store = await started(client);
+      store.dispose();
+      const before = client.graphql.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 3);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+    });
+  });
+
+  describe('pollChecks', () => {
+    async function loaded(client: IStubClient): Promise<DashboardStore> {
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      const store = makeStore(client);
+      await store.refresh();
+      return store;
+    }
+
+    it('spends nothing and changes nothing when GitHub answers 304', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      const before = store.getSnapshot().prs;
+
+      await store.pollChecks(before);
+      expect(store.getSnapshot().prs).toBe(before);
+      store.dispose();
+    });
+
+    it('applies the new checks, and recolours the row by the worst of them', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockResolvedValue({ notModified: false, runs: [
+        { name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS', details_url: 'https://ci/1' },
+        { name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE', details_url: null },
+      ]});
+
+      await store.pollChecks(store.getSnapshot().prs);
+
+      const [ updated ] = store.getSnapshot().prs;
+      expect(updated?.checkState).toBe('failure');
+      expect(updated?.checks).toEqual([
+        { name: 'build', state: 'success', url: 'https://ci/1' },
+        { name: 'lint', state: 'failure', url: undefined },
+      ]);
+      store.dispose();
+    });
+
+    it('leaves alone the pull requests whose checks did not change', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }), node({ id: 'B' }) ]));
+      const store = makeStore(client);
+      await store.refresh();
+      const before = store.getSnapshot().prs;
+
+      checksMock
+        .mockResolvedValueOnce({ notModified: false, runs: [
+          { name: 'build', status: 'COMPLETED', conclusion: 'FAILURE', details_url: null },
+        ]})
+        .mockResolvedValueOnce({ notModified: true, runs: []});
+
+      await store.pollChecks(before);
+
+      const after = store.getSnapshot().prs;
+      expect(after[0]?.checkState).toBe('failure');
+      // Untouched, right down to the object identity.
+      expect(after[1]).toBe(before[1]);
+      store.dispose();
+    });
+
+    it('reads a commit whose only checks are inconclusive as grey too', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockResolvedValue({ notModified: false, runs: [
+        { name: 'build', status: 'COMPLETED', conclusion: 'SKIPPED', details_url: null },
+      ]});
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().prs[0]?.checkState).toBe('none');
+      store.dispose();
+    });
+
+    it('reads a commit with no checks as grey', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockResolvedValue({ notModified: false, runs: []});
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().prs[0]?.checkState).toBe('none');
+      store.dispose();
+    });
+
+    it('shrugs off one repository it cannot read', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockRejectedValue(new Error('no access'));
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().error).toBeUndefined();
+      expect(store.getSnapshot().backoffUntil).toBeUndefined();
+      store.dispose();
+    });
+
+    it('backs off, and says so, when GitHub asks it to slow down', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockRejectedValue(rateLimited());
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().backoffReason).toBe('GitHub asked us to slow down');
+      expect(store.getSnapshot().backoffUntil).toBeGreaterThan(Date.now());
+      store.dispose();
+    });
+
+    it('reports the REST quota, which is what the conditional polling spends', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().restRateLimit).toEqual({ limit: 5000, remaining: 4900, reset: 1_700_000_000 });
+      store.dispose();
+    });
+
+    it('drops an answer that arrives after the store was replaced', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockImplementationOnce(async() => {
+        store.dispose();
+        return { notModified: false, runs: []};
+      });
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().prs[0]?.checkState).toBe('success');
+    });
+
+    it('drops a failure that arrives after the store was replaced', async() => {
+      const client = stubClient();
+      const store = await loaded(client);
+      checksMock.mockImplementationOnce(async() => {
+        store.dispose();
+        throw rateLimited();
+      });
+
+      await store.pollChecks(store.getSnapshot().prs);
+      expect(store.getSnapshot().backoffReason).toBeUndefined();
+    });
+  });
+
+  describe('a merge method a repository refuses', () => {
+    it('remembers the next one to try for that repository', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      const saved: ISettings[] = [];
+      const store = new DashboardStore(
+        <GitHubClient> <unknown> client,
+        'rubensworks',
+        SETTINGS,
+        [],
+        next => saved.push(next),
+      );
+      await store.refresh();
+      client.mergePr.mockRejectedValue(notAllowed());
+
+      await store.runActions('merge', store.getSnapshot().prs);
+
+      expect(saved.at(-1)?.repoMergeMethods).toEqual({ 'rubensworks/jbr.js': 'merge' });
+      store.dispose();
+    });
+
+    it('says nothing when the same refusal happens twice', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }), node({ id: 'B' }) ]));
+      const saved: ISettings[] = [];
+      const store = new DashboardStore(
+        <GitHubClient> <unknown> client,
+        'rubensworks',
+        SETTINGS,
+        [],
+        next => saved.push(next),
+      );
+      await store.refresh();
+      client.mergePr.mockRejectedValue(notAllowed());
+
+      await store.runActions('merge', store.getSnapshot().prs);
+      expect(saved).toHaveLength(1);
+      store.dispose();
+    });
+
+    it('leaves the settings alone for any other failure', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      const saved: ISettings[] = [];
+      const store = new DashboardStore(
+        <GitHubClient> <unknown> client,
+        'rubensworks',
+        SETTINGS,
+        [],
+        next => saved.push(next),
+      );
+      await store.refresh();
+      client.mergePr.mockRejectedValue(new Error('offline'));
+
+      await store.runActions('merge', store.getSnapshot().prs);
+      expect(saved).toEqual([]);
       store.dispose();
     });
   });

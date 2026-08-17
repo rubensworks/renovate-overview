@@ -16,6 +16,25 @@ interface ICacheEntry {
   data: unknown;
 }
 
+export interface IApiCheckRun {
+  name: string;
+  status: string | null;
+  conclusion: string | null;
+  details_url: string | null;
+}
+
+interface IApiCheckRuns {
+  check_runs?: IApiCheckRun[];
+}
+
+export interface ICheckRunList {
+  runs: IApiCheckRun[];
+  /**
+   * Whether GitHub answered `304`, which means nothing has changed and nothing was charged.
+   */
+  notModified: boolean;
+}
+
 interface IApiUser {
   login: string;
   name: string | null;
@@ -165,6 +184,25 @@ export class GitHubClient {
    */
   public async checkOrgAccess(org: string): Promise<void> {
     await this.conditionalRequest('GET /orgs/{org}/repos', { org, per_page: 1 }, org);
+  }
+
+  /**
+   * Lists the check runs of a commit, conditionally.
+   *
+   * This is the one thing worth polling over REST rather than GraphQL: a `304 Not Modified` does
+   * not count against the REST rate limit, and GraphQL has no equivalent, so re-reading the
+   * checks of a handful of pending pull requests every half minute costs nothing once they settle.
+   * @param owner The repository owner.
+   * @param repo The repository name.
+   * @param ref A commit sha.
+   */
+  public async getCheckRuns(owner: string, repo: string, ref: string): Promise<ICheckRunList> {
+    const { data, notModified } = await this.conditionalRequest<IApiCheckRuns>(
+      'GET /repos/{owner}/{repo}/commits/{ref}/check-runs',
+      { owner, repo, ref, per_page: 30 },
+      owner,
+    );
+    return { runs: data.check_runs ?? [], notModified };
   }
 
   /**

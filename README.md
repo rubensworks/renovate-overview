@@ -13,12 +13,10 @@ GitHub's own search can list your Renovate PRs. What it cannot tell you is that 
 waiting in 14 repositories, 12 of them green and 2 red — which is exactly the view that makes a
 large backlog tractable.
 
-> **Status:** in development. Paste a token and you get the whole backlog: every open Renovate pull
-> request across your account and your organisations, grouped by dependency or by repository,
-> sorted and filtered however you like, with the view in the URL so you can bookmark it. Turn on
-> write actions and you can merge, approve, rebase and close — per pull request or over a
-> selection. What is left is the polish described in [`CLAUDE.md`](CLAUDE.md): background polling,
-> favicon and title status, keyboard shortcuts and the mobile layout.
+Paste a token and you get the whole backlog: every open Renovate pull request across your account
+and your organisations, grouped by dependency or by repository, sorted and filtered however you
+like, with the view in the URL so you can bookmark it. Turn on write actions and you can merge,
+approve, rebase and close — per pull request or over a selection.
 
 ## How it works
 
@@ -107,6 +105,29 @@ Signing out clears both storages. A stored token is never rendered back into the
 Grouping, sorting, filters and collapsed groups are kept in the **URL fragment**, so a view like
 "everything failing, grouped by dependency" is bookmarkable and shareable. A fragment is never sent
 to a server, so sharing a link never leaks anything.
+
+## Keyboard shortcuts
+
+| Key | What it does |
+|---|---|
+| <kbd>/</kbd> | Jump to the filter box |
+| <kbd>r</kbd> | Refresh now |
+| <kbd>g</kbd> | Toggle grouping by dependency |
+| <kbd>Esc</kbd> | Dismiss a confirmation |
+
+## Refreshing
+
+The whole search re-runs every couple of minutes. Pull requests whose checks are still running are
+re-read every thirty seconds instead — over REST, conditionally, because a `304 Not Modified` is
+free where a GraphQL query never is. Requests are jittered so a batch does not arrive all at once.
+
+Nothing polls while the tab is hidden: a dashboard nobody is looking at has no business spending
+your rate limit. Polling slows down as the GraphQL quota drains and stops entirely before it runs
+out, saying so in the footer rather than going quiet. A `403` or `429` is honoured with whatever
+`retry-after` says.
+
+Pin the tab and it becomes a passive monitor: the favicon takes the colour of the worst state and
+the title carries the count — `(3✕) Renovate Overview` when three are failing.
 
 ## Rate limits
 

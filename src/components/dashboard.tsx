@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { applyOverallStatus } from '../lib/favicon';
 import type { IGroup } from '../lib/selectors';
 import {
   EMPTY_FILTERS,
@@ -10,6 +11,7 @@ import {
   sortGroups,
   sortPrs,
   updateTypesPresent,
+  worstState,
 } from '../lib/selectors';
 import type { DashboardStore } from '../lib/store';
 import type { ActionKind, IRenovatePr, ISettings } from '../lib/types';
@@ -48,10 +50,53 @@ export function Dashboard({ store, settings }: IDashboardProps) {
   const [ view, setView ] = useState<IViewState>(() => readViewState(location.hash));
   const [ now, setNow ] = useState(() => Date.now());
   const [ pending, setPending ] = useState<IPending | undefined>();
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     writeViewState(view);
   }, [ view ]);
+
+  // A pinned tab is a passive monitor, so the whole state has to fit in a favicon and a title.
+  useEffect(() => {
+    applyOverallStatus(
+      worstState(state.prs),
+      state.prs.length,
+      state.prs.filter(pr => pr.checkState === 'failure' || pr.checkState === 'error').length,
+    );
+  }, [ state.prs ]);
+
+  // Shortcuts for the things done over and over while working through a backlog. Nothing fires
+  // while the user is typing into a field, and nothing here writes to GitHub.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      const target = event.target;
+      const typing = target instanceof HTMLElement &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      if (event.key === 'Escape') {
+        setPending(undefined);
+        return;
+      }
+      if (typing) {
+        return;
+      }
+      if (event.key === '/') {
+        event.preventDefault();
+        searchRef.current?.focus();
+      } else if (event.key === 'r') {
+        void store.refresh();
+      } else if (event.key === 'g') {
+        setView(current => ({
+          ...current,
+          group: current.group === 'dependency' ? 'none' : 'dependency',
+        }));
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [ store ]);
 
   // Relative ages go stale on their own; nothing else here needs a ticking clock.
   useEffect(() => {
@@ -158,6 +203,7 @@ export function Dashboard({ store, settings }: IDashboardProps) {
         updateTypes={updateTypesPresent(state.prs)}
         hiddenCount={state.prs.length - visible.length}
         onChange={setView}
+        searchRef={searchRef}
       />
 
       {visible.length === 0 && !state.loading ?

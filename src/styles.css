@@ -1072,3 +1072,63 @@ code {
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+.status__dot--paused { background: var(--neutral); }
+
+/* ------------------------------------------------------------------ small */
+
+/* Below this the header wraps and the row sheds everything that is not the
+   dependency, its status and its age — a phone screen fits about that much. */
+@media (width <= 720px) {
+  .app__body {
+    padding: 12px 8px;
+  }
+
+  .header {
+    padding: 6px 8px;
+  }
+
+  .header__title {
+    font-size: 13px;
+  }
+
+  .filters__search {
+    flex: 1 1 100%;
+  }
+
+  .pr__line {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .pr__title,
+  .pr__versions {
+    display: none;
+  }
+
+  .pr__repo {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pr__detail {
+    padding-left: 10px;
+  }
+
+  .group__header {
+    row-gap: 2px;
+  }
+
+  .group__breakdown {
+    flex-basis: 100%;
+  }
+
+  .settings {
+    grid-template-columns: 1fr;
+  }
+
+  .modal__box {
+    max-width: 100%;
+  }
+}

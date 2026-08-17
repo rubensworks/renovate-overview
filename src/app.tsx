@@ -55,6 +55,7 @@ export function SignedIn(props: ISignedInProps) {
       session.viewer.login,
       settings,
       ownerTokens,
+      props.onSettingsChange,
     ),
     // Settings are deliberately not a dependency: they are pushed into the store by the effect
     // below, so changing one re-searches without throwing the rows away and rebuilding the client.
@@ -63,6 +64,7 @@ export function SignedIn(props: ISignedInProps) {
 
   useEffect(() => {
     void store.refresh();
+    store.start();
     return () => store.dispose();
   }, [ store ]);
 

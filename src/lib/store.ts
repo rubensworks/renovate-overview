@@ -1,6 +1,6 @@
-import { NothingToDoError, backoffFor, runAction } from './actions';
+import { NothingToDoError, backoffFor, mergeMethodFor, runAction } from './actions';
 import type { GitHubClient } from './githubClient';
-import { describeError } from './githubClient';
+import { asHttpError, describeError } from './githubClient';
 import { resolveUpdates } from './renovate/resolve';
 import type { ISearchPage, ISearchScope } from './search';
 import {
@@ -16,16 +16,20 @@ import {
   normalizePage,
   planSearches,
   splitScope,
+  checkRunState,
 } from './search';
 import type {
   ActionKind,
+  CheckState,
   IActionResult,
   IDashboardState,
   IGraphqlRateLimit,
   IOwnerToken,
+  IPrCheck,
   IRenovatePr,
   IRenovateResolution,
   ISettings,
+  MergeMethod,
   ITruncatedScope,
   Mergeable,
 } from './types';
@@ -56,6 +60,42 @@ export const BODY_BATCH_SIZE = 10;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+/**
+ * How often the whole search is re-run, and how often the pull requests whose checks are still
+ * running are re-read over REST. Pending ones move; settled ones mostly do not.
+ */
+export const IDLE_POLL_MS = 120_000;
+export const PENDING_POLL_MS = 30_000;
+
+/**
+ * The scheduler wakes up this often and decides what, if anything, is due.
+ */
+export const TICK_MS = 2000;
+
+/**
+ * How many pending pull requests are re-read per tick, so a backlog of two hundred running checks
+ * does not become two hundred simultaneous requests.
+ */
+const PENDING_BATCH = 5;
+
+/**
+ * What to try next when a repository refuses a merge method. Squash is the most commonly allowed,
+ * so anything else falls back to it and squash falls back to a merge commit.
+ */
+const MERGE_FALLBACKS: Record<MergeMethod, MergeMethod> = {
+  squash: 'merge',
+  merge: 'squash',
+  rebase: 'squash',
+};
+
+/**
+ * Polling slows by this factor once the GraphQL quota drops below {@link LOW_QUOTA_RATIO}, and
+ * stops entirely below {@link CRITICAL_QUOTA_RATIO} so that a manual refresh still has room.
+ */
+const LOW_QUOTA_FACTOR = 5;
+const LOW_QUOTA_RATIO = 0.15;
+const CRITICAL_QUOTA_RATIO = 0.03;
+
 export const INITIAL_STATE: IDashboardState = {
   prs: [],
   loading: false,
@@ -64,6 +104,10 @@ export const INITIAL_STATE: IDashboardState = {
   selected: [],
   droppedFromSelection: 0,
   actionRun: undefined,
+  restRateLimit: undefined,
+  paused: false,
+  backoffUntil: undefined,
+  backoffReason: undefined,
   totalCount: 0,
   rateLimit: undefined,
   lastRefreshedAt: undefined,
@@ -128,6 +172,7 @@ export class DashboardStore {
   private state: IDashboardState = INITIAL_STATE;
   private settings: ISettings;
   private ownerTokens: IOwnerToken[];
+  private readonly onSettingsChange: ((settings: ISettings) => void) | undefined;
   private readonly viewerLogin: string;
   /**
    * Parsed bodies, keyed by pull request id and update time, so a body is parsed once and a pull
@@ -136,6 +181,15 @@ export class DashboardStore {
   private readonly bodyCache = new Map<string, IRenovateResolution>();
   private readonly bodiesInFlight = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private ticker: ReturnType<typeof setInterval> | undefined;
+  private readonly onVisibilityChange: () => void;
+  /**
+   * When the whole search was last re-run, and when each pending pull request's checks were last
+   * re-read, both as Unix timestamps in milliseconds.
+   */
+  private lastFullPoll = 0;
+  private readonly pendingPolledAt = new Map<string, number>();
+  private polling = false;
   /**
    * Bumped on every refresh, so a slow page from a superseded run cannot overwrite a newer one.
    */
@@ -146,11 +200,32 @@ export class DashboardStore {
     viewerLogin: string,
     settings: ISettings,
     ownerTokens: IOwnerToken[],
+    onSettingsChange?: (settings: ISettings) => void,
   ) {
     this.client = client;
+    this.onSettingsChange = onSettingsChange;
     this.viewerLogin = viewerLogin;
     this.settings = settings;
     this.ownerTokens = ownerTokens;
+    this.onVisibilityChange = () => {
+      this.patch({ paused: document.hidden });
+    };
+  }
+
+  /**
+   * Starts polling: a full search every couple of minutes, and the pull requests whose checks are
+   * still running every half minute over REST.
+   *
+   * Nothing polls while the tab is hidden. A dashboard nobody is looking at has no business
+   * spending anybody's rate limit.
+   */
+  public start(): void {
+    if (this.ticker !== undefined) {
+      return;
+    }
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+    this.patch({ paused: document.hidden });
+    this.ticker = setInterval(() => this.tick(), TICK_MS);
   }
 
   public subscribe = (listener: () => void): (() => void) => {
@@ -184,6 +259,118 @@ export class DashboardStore {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
+    if (this.ticker !== undefined) {
+      clearInterval(this.ticker);
+      this.ticker = undefined;
+    }
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+  }
+
+  // One low-frequency ticker decides what is due, rather than a timer per thing being polled.
+  private tick(): void {
+    const now = Date.now();
+    if (this.state.paused || this.polling || this.state.loading) {
+      return;
+    }
+    if (this.state.backoffUntil !== undefined) {
+      if (now < this.state.backoffUntil) {
+        return;
+      }
+      this.patch({ backoffUntil: undefined, backoffReason: undefined });
+    }
+
+    const ratio = quotaRatio(this.state.rateLimit);
+    if (ratio < CRITICAL_QUOTA_RATIO) {
+      // Stopping short of zero leaves room for a manual refresh, and says so rather than just
+      // going quiet.
+      this.patch({
+        backoffUntil: now + IDLE_POLL_MS,
+        backoffReason: 'GraphQL quota nearly spent — polling paused',
+      });
+      return;
+    }
+    const slowdown = ratio < LOW_QUOTA_RATIO ? LOW_QUOTA_FACTOR : 1;
+
+    let job: Promise<void> | undefined;
+    if (now - this.lastFullPoll >= IDLE_POLL_MS * slowdown) {
+      this.lastFullPoll = now;
+      job = this.refresh();
+    } else {
+      const due = this.state.prs
+        .filter(pr => pr.checkState === 'pending')
+        .filter(pr => now - (this.pendingPolledAt.get(pr.id) ?? 0) >= PENDING_POLL_MS * slowdown)
+        .slice(0, PENDING_BATCH);
+      if (due.length > 0) {
+        job = this.pollChecks(due);
+      }
+    }
+
+    if (job === undefined) {
+      return;
+    }
+    this.polling = true;
+    // Both of those record their own failures in the state and always resolve, so there is
+    // nothing to handle here beyond letting the scheduler know it is free again.
+    // eslint-disable-next-line ts/no-floating-promises
+    job.finally(() => {
+      this.polling = false;
+    });
+  }
+
+  /**
+   * Re-reads the checks of pull requests that were still running, over REST and conditionally.
+   *
+   * A `304` is free, which is what makes a thirty-second interval affordable for the handful of
+   * pull requests that are actually moving.
+   * @param prs The pull requests to re-read.
+   */
+  public async pollChecks(prs: IRenovatePr[]): Promise<void> {
+    const generation = this.generation;
+    const updates = new Map<string, { checkState: CheckState; checks: IPrCheck[] }>();
+
+    for (const pr of prs) {
+      // Jittered so that a batch does not arrive as a burst, and so two tabs do not sync up.
+      this.pendingPolledAt.set(pr.id, Date.now() + Math.floor(Math.random() * PENDING_POLL_MS * 0.3));
+      const [ owner, name ] = splitRepo(pr.repo);
+      try {
+        const { runs, notModified } = await this.client.getCheckRuns(owner, name, pr.headSha);
+        if (this.generation !== generation) {
+          return;
+        }
+        if (notModified) {
+          continue;
+        }
+        const checks = runs.map(run => ({
+          name: run.name,
+          state: checkRunState(run.status, run.conclusion),
+          url: run.details_url ?? undefined,
+        }));
+        updates.set(pr.id, { checkState: worstOf(checks), checks });
+      } catch (error: unknown) {
+        if (this.generation !== generation) {
+          return;
+        }
+        const backoff = backoffFor(error);
+        if (backoff !== undefined) {
+          this.patch({
+            backoffUntil: Date.now() + backoff,
+            backoffReason: 'GitHub asked us to slow down',
+          });
+          break;
+        }
+        // A single repository the token cannot read its checks for is not worth a banner.
+      }
+    }
+
+    this.patch({
+      prs: updates.size === 0 ?
+        this.state.prs :
+        this.state.prs.map((pr) => {
+          const update = updates.get(pr.id);
+          return update === undefined ? pr : { ...pr, ...update };
+        }),
+      restRateLimit: this.client.rateLimit,
+    });
   }
 
   /**
@@ -249,7 +436,9 @@ export class DashboardStore {
       truncated,
       lastRefreshedAt: Date.now(),
       rateLimit: this.client.graphqlRateLimit,
+      restRateLimit: this.client.rateLimit,
     });
+    this.lastFullPoll = Date.now();
     this.scheduleMergeableRetry(generation);
   }
 
@@ -492,6 +681,7 @@ export class DashboardStore {
         }
         consecutiveFailures += 1;
         this.updateResult(kind, results, result, { outcome: 'failed', message: describeError(error) });
+        this.rememberMergeRefusal(kind, pr, error);
 
         const backoff = backoffFor(error);
         if (backoff !== undefined) {
@@ -512,6 +702,28 @@ export class DashboardStore {
     this.patch({ actionRun: { kind, results, running: false, stoppedReason }});
     // Only the pull requests that actually changed are re-read, rather than the whole search.
     await this.refreshPrs(touched, generation);
+  }
+
+  // A 405 on a merge means the repository forbids the method, not that the merge was wrong. The
+  // next method it allows is remembered for that repository, so a retry is one click rather than
+  // a trip through the settings.
+  private rememberMergeRefusal(kind: ActionKind, pr: IRenovatePr, error: unknown): void {
+    if (kind !== 'merge' || asHttpError(error)?.status !== 405 || this.onSettingsChange === undefined) {
+      return;
+    }
+    const key = pr.repo.toLowerCase();
+    // Only ever set once. Deriving a new fallback from the override just set would flip the
+    // repository back and forth between two methods on every retry.
+    if (this.settings.repoMergeMethods[key] !== undefined) {
+      return;
+    }
+    const fallback = MERGE_FALLBACKS[mergeMethodFor(pr.repo, this.settings)];
+    const next: ISettings = {
+      ...this.settings,
+      repoMergeMethods: { ...this.settings.repoMergeMethods, [key]: fallback },
+    };
+    this.settings = next;
+    this.onSettingsChange(next);
   }
 
   // A write changes one pull request, so one small query brings it back up to date. Re-running
@@ -583,6 +795,20 @@ export class DashboardStore {
       listener();
     }
   }
+}
+
+// The worst state among a commit's checks, which is how a row is coloured when the rollup is not
+// on hand — the REST listing has no equivalent of GraphQL's rollup state.
+function worstOf(checks: IPrCheck[]): CheckState {
+  // `none` is the answer both when there are no checks and when every one of them is itself
+  // inconclusive — a commit whose only check was skipped says nothing either way.
+  const order: CheckState[] = [ 'failure', 'error', 'pending', 'success' ];
+  return order.find(state => checks.some(check => check.state === state)) ?? 'none';
+}
+
+function splitRepo(repo: string): [string, string] {
+  const slash = repo.indexOf('/');
+  return [ repo.slice(0, Math.max(0, slash)), repo.slice(slash + 1) ];
 }
 
 // A body is only worth reusing while the pull request it came from has not changed.

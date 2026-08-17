@@ -260,6 +260,20 @@ export interface IDashboardState {
    */
   actionRun: IActionRun | undefined;
   rateLimit: IGraphqlRateLimit | undefined;
+  /**
+   * The REST quota, which the conditional check-run polling spends and which `304` answers do not.
+   */
+  restRateLimit: IRateLimit | undefined;
+  /**
+   * Whether polling is suspended because the tab is hidden.
+   */
+  paused: boolean;
+  /**
+   * Unix timestamp in milliseconds until which polling is held off, after GitHub asked us to
+   * slow down or because the quota is nearly spent.
+   */
+  backoffUntil: number | undefined;
+  backoffReason: string | undefined;
   lastRefreshedAt: number | undefined;
   /**
    * Scopes whose results were cut off at the search ceiling even after splitting per owner.

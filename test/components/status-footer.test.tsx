@@ -34,6 +34,37 @@ describe('StatusFooter', () => {
     expect(container.textContent).toContain('updated 4m ago');
   });
 
+  it('says when polling is paused because nobody is looking', () => {
+    renderFooter({ paused: true });
+    expect(screen.getByText('Paused — tab is hidden')).toBeDefined();
+  });
+
+  it('says how long it is holding off for, and why', () => {
+    const container = renderFooter({
+      backoffUntil: NOW + 90_000,
+      backoffReason: 'GraphQL quota nearly spent — polling paused',
+    });
+    expect(container.textContent).toContain('GraphQL quota nearly spent — polling paused (2m)');
+  });
+
+  it('falls back to a plain word when the reason went missing', () => {
+    const container = renderFooter({ backoffUntil: NOW + 60_000, backoffReason: undefined });
+    expect(container.textContent).toContain('Backing off');
+  });
+
+  it('ignores a hold-off that has already expired', () => {
+    renderFooter({ prs: [ pr() ], backoffUntil: NOW - 1000, backoffReason: 'over' });
+    expect(screen.getByText('1 open')).toBeDefined();
+  });
+
+  it('reports the REST quota beside the GraphQL one, once anything has spent it', () => {
+    const container = renderFooter({
+      rateLimit: { limit: 5000, cost: 1, remaining: 4000, resetAt: '2026-08-17T12:30:00Z' },
+      restRateLimit: { limit: 5000, remaining: 4321, reset: 0 },
+    });
+    expect(container.textContent).toContain('4321/5000 REST');
+  });
+
   it('says nothing about the quota until one is reported', () => {
     expect(renderFooter().textContent).toContain('GraphQL quota unknown');
   });

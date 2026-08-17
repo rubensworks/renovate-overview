@@ -167,17 +167,10 @@ states. Reflect overall state in the favicon and page title so a pinned tab is a
 
 ## Build order
 
-1. **Scaffold** — Vite + React + TS, ESLint, Vitest, CI, Pages deploy, `renovate.json`, this file.
-2. **Auth** — setup screen, token validation, storage, sign-out, per-org tokens, read-only default.
-3. **Fetch + flat list** — GraphQL search, pagination, progressive render, check-status colouring,
-   rate-limit footer.
-4. **Parser** — test-first, with the fixtures.
-5. **Grouping, sorting, filtering, URL state** — including lazy body loading.
-6. **Actions** — per-PR, then selection and bulk, then confirmation and progress UI.
-7. **Polish** — theme, mobile layout, favicon and title status, keyboard shortcuts, empty and error
-   states, README token instructions.
-
-Stop at each milestone and wait for review before continuing.
+All seven milestones are done: scaffold, auth, fetch and flat list, parser, grouping/sorting/
+filtering/URL state, actions, and polish. Anything further is a change to a working app rather
+than a milestone — keep the constraints above, keep coverage at 100%, and keep stopping for review
+on anything that changes the security model or adds a host.
 
 ## Ask rather than guess
 

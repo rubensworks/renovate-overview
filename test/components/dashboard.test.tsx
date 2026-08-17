@@ -299,6 +299,71 @@ describe('Dashboard', () => {
     });
   });
 
+  describe('the tab itself', () => {
+    it('reflects the worst state in the title and the favicon', () => {
+      renderDashboard({ prs: [ GREEN, RED ]});
+      expect(document.title).toBe('(1✕) Renovate Overview');
+      expect(document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.href).toContain('data:image/svg+xml');
+    });
+
+    it('counts what is open when nothing is failing', () => {
+      renderDashboard({ prs: [ GREEN ]});
+      expect(document.title).toBe('(1) Renovate Overview');
+    });
+  });
+
+  describe('keyboard shortcuts', () => {
+    it('puts the cursor in the filter on /', () => {
+      renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(document, { key: '/' });
+      expect(document.activeElement).toBe(screen.getByLabelText('Filter'));
+    });
+
+    it('refreshes on r', () => {
+      const store = renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(document, { key: 'r' });
+      expect(store.refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('toggles grouping by dependency on g', () => {
+      renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(document, { key: 'g' });
+      expect(location.hash).toBe('#g=dependency');
+      fireEvent.keyDown(document, { key: 'g' });
+      expect(location.hash).toBe('');
+    });
+
+    it.each([ 'Filter', 'Group' ])('stays out of the way while %s is being used', (label) => {
+      const store = renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(screen.getByLabelText(label), { key: 'r' });
+      expect(store.refresh).not.toHaveBeenCalled();
+    });
+
+    it('ignores a shortcut that is part of a browser chord', () => {
+      const store = renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(document, { key: 'r', metaKey: true });
+      fireEvent.keyDown(document, { key: 'r', ctrlKey: true });
+      fireEvent.keyDown(document, { key: 'r', altKey: true });
+      expect(store.refresh).not.toHaveBeenCalled();
+    });
+
+    it('does nothing for a key it has no use for', () => {
+      const store = renderDashboard({ prs: [ GREEN ]});
+      fireEvent.keyDown(document, { key: 'q' });
+      expect(store.refresh).not.toHaveBeenCalled();
+      expect(location.hash).toBe('');
+    });
+
+    it('closes a confirmation on Escape, from anywhere including a field', () => {
+      const store = new FakeStore({ prs: [ GREEN ], selected: [ 'g' ]});
+      render(<Dashboard store={store as unknown as DashboardStore} settings={{ ...SETTINGS, writeActions: true }} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Approve selected' }));
+      expect(screen.getByRole('dialog')).toBeDefined();
+      fireEvent.keyDown(screen.getByLabelText('Filter'), { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+  });
+
   it('keeps the relative ages moving without a refresh', () => {
     renderDashboard({ prs: [ pr({ updatedAt: new Date(Date.now() - 1000).toISOString() }) ]});
     expect(screen.getByText('1s')).toBeDefined();

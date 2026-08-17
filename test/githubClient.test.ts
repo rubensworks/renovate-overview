@@ -196,6 +196,33 @@ describe('GitHubClient', () => {
     });
   });
 
+  describe('getCheckRuns', () => {
+    it('asks conditionally, so an unchanged answer costs nothing', async() => {
+      requestMock.mockResolvedValue(response({ check_runs: [{ name: 'build' }]}, { etag: 'W/"1"' }));
+      const client = new GitHubClient('t');
+      await expect(client.getCheckRuns('o', 'r', 'sha')).resolves.toEqual({
+        runs: [{ name: 'build' }],
+        notModified: false,
+      });
+      expect(requestMock).toHaveBeenCalledWith(
+        'GET /repos/{owner}/{repo}/commits/{ref}/check-runs',
+        containing({ owner: 'o', repo: 'r', ref: 'sha', per_page: 30 }),
+      );
+
+      requestMock.mockRejectedValue(new HttpError(304, 'Not Modified'));
+      await expect(client.getCheckRuns('o', 'r', 'sha')).resolves.toEqual({
+        runs: [{ name: 'build' }],
+        notModified: true,
+      });
+    });
+
+    it('reads a response that lists no check runs at all', async() => {
+      requestMock.mockResolvedValue(response({}));
+      await expect(new GitHubClient('t').getCheckRuns('o', 'r', 'sha'))
+        .resolves.toEqual({ runs: [], notModified: false });
+    });
+  });
+
   describe('writes', () => {
     beforeEach(() => {
       requestMock.mockResolvedValue(response({}));

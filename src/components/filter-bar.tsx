@@ -13,6 +13,10 @@ export interface IFilterBarProps {
    */
   hiddenCount: number;
   onChange: (view: IViewState) => void;
+  /**
+   * Handed in so that the `/` shortcut can put the cursor here.
+   */
+  searchRef?: React.MutableRefObject<HTMLInputElement | null>;
 }
 
 interface IToggle {
@@ -45,9 +49,10 @@ export function FilterBar(props: IFilterBarProps) {
     <div className="filters">
       <div className="filters__row">
         <input
+          ref={props.searchRef}
           className="filters__search"
           type="search"
-          placeholder="Filter by repository, dependency, title or branch…"
+          placeholder="Filter by repository, dependency, title or branch… (press /)"
           aria-label="Filter"
           value={filters.query}
           onChange={event => setFilters({ query: event.target.value })}
