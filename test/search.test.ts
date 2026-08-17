@@ -146,6 +146,13 @@ describe('normalizePr', () => {
     expect(normalizePr(node())).toEqual(pr());
   });
 
+  it('resolves what it updates straight away, from the title and branch', () => {
+    const parsed = normalizePr(node());
+    expect(parsed?.parse.source).toBe('title');
+    expect(parsed?.parse.updates.map(update => update.groupKey)).toEqual([ 'lodash' ]);
+    expect(parsed?.bodyLoaded).toBe(false);
+  });
+
   it('drops a node that is not a pull request at all', () => {
     expect(normalizePr(null)).toBeUndefined();
     expect(normalizePr({})).toBeUndefined();
@@ -263,6 +270,15 @@ describe('normalizePr', () => {
       checkState: 'none',
       checks: [],
       headSha: '',
+      parse: {
+        updates: [],
+        isGroupPr: false,
+        groupName: undefined,
+        updateType: 'unknown',
+        source: 'unknown',
+        disagreements: [],
+      },
+      bodyLoaded: false,
     });
   });
 

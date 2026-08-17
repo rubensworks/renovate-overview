@@ -1,7 +1,9 @@
 import type { GitHubClient } from './githubClient';
 import { describeError } from './githubClient';
+import { resolveUpdates } from './renovate/resolve';
 import type { ISearchPage, ISearchScope } from './search';
 import {
+  BODIES_QUERY,
   MERGEABLE_QUERY,
   PAGE_SIZE,
   SEARCH_CEILING,
@@ -19,6 +21,7 @@ import type {
   IGraphqlRateLimit,
   IOwnerToken,
   IRenovatePr,
+  IRenovateResolution,
   ISettings,
   ITruncatedScope,
   Mergeable,
@@ -35,10 +38,17 @@ export const MERGEABLE_RETRY_MS = 3000;
  */
 const MAX_PAGES = 40;
 
+/**
+ * How many bodies to ask for at once. Bodies are large, so a big batch is a slow response rather
+ * than a cheap one; several small ones also let rows fill in progressively.
+ */
+export const BODY_BATCH_SIZE = 10;
+
 export const INITIAL_STATE: IDashboardState = {
   prs: [],
   loading: false,
   error: undefined,
+  bodyError: undefined,
   totalCount: 0,
   rateLimit: undefined,
   lastRefreshedAt: undefined,
@@ -60,6 +70,15 @@ interface IMergeableResponse {
   nodes?: (IMergeableNode | null)[] | null;
 }
 
+interface IBodyNode {
+  id?: string;
+  body?: string | null;
+}
+
+interface IBodyResponse {
+  nodes?: (IBodyNode | null)[] | null;
+}
+
 /**
  * Owns the pull request data and exposes an immutable snapshot for `useSyncExternalStore`.
  *
@@ -73,6 +92,12 @@ export class DashboardStore {
   private settings: ISettings;
   private ownerTokens: IOwnerToken[];
   private readonly viewerLogin: string;
+  /**
+   * Parsed bodies, keyed by pull request id and update time, so a body is parsed once and a pull
+   * request that has since changed is not shown a stale parse.
+   */
+  private readonly bodyCache = new Map<string, IRenovateResolution>();
+  private readonly bodiesInFlight = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   /**
    * Bumped on every refresh, so a slow page from a superseded run cannot overwrite a newer one.
@@ -135,7 +160,7 @@ export class DashboardStore {
       this.timer = undefined;
     }
 
-    this.patch({ loading: true, error: undefined, truncated: []});
+    this.patch({ loading: true, error: undefined, bodyError: undefined, truncated: []});
 
     const authors = authorsFor(this.settings);
     const groups: IRenovatePr[][] = [];
@@ -272,12 +297,96 @@ export class DashboardStore {
     });
   }
 
+  /**
+   * Fetches the bodies of the given pull requests and folds them into their parses.
+   *
+   * Called when something actually needs them: when the list is grouped by dependency, where a
+   * group pull request's members matter, and when a row is expanded. Anything already fetched, or
+   * already in flight, is skipped.
+   * @param ids The pull requests to fetch bodies for.
+   */
+  public async loadBodies(ids: string[]): Promise<void> {
+    const generation = this.generation;
+    const wanted = this.state.prs.filter(pr =>
+      ids.includes(pr.id) && !pr.bodyLoaded && !this.bodiesInFlight.has(pr.id));
+
+    // A body already parsed under the same update time needs no request at all.
+    const cached = wanted.filter(pr => this.bodyCache.has(cacheKey(pr)));
+    if (cached.length > 0) {
+      this.applyParses(new Map(cached.map(pr => [ pr.id, this.bodyCache.get(cacheKey(pr)) ])));
+    }
+
+    const toFetch = wanted.filter(pr => !this.bodyCache.has(cacheKey(pr)));
+    for (const pr of toFetch) {
+      this.bodiesInFlight.add(pr.id);
+    }
+
+    try {
+      for (let start = 0; start < toFetch.length; start += BODY_BATCH_SIZE) {
+        const batch = toFetch.slice(start, start + BODY_BATCH_SIZE);
+        const response = await this.client.graphql<IBodyResponse>(
+          BODIES_QUERY,
+          { ids: batch.map(pr => pr.id) },
+        );
+        if (this.generation !== generation) {
+          return;
+        }
+        const bodies = new Map<string, string>();
+        for (const node of response.nodes ?? []) {
+          if (node?.id !== undefined && typeof node.body === 'string') {
+            bodies.set(node.id, node.body);
+          }
+        }
+        const parses = new Map<string, IRenovateResolution | undefined>();
+        for (const pr of batch) {
+          const body = bodies.get(pr.id);
+          // A body GitHub did not hand over still counts as loaded: asking again would fail the
+          // same way, and the title parse is what the row keeps.
+          const parse = body === undefined ? undefined : resolveUpdates(pr, body);
+          if (parse !== undefined) {
+            this.bodyCache.set(cacheKey(pr), parse);
+          }
+          parses.set(pr.id, parse);
+        }
+        this.applyParses(parses);
+        this.patch({ rateLimit: this.client.graphqlRateLimit });
+      }
+    } catch (error: unknown) {
+      if (this.generation === generation) {
+        this.patch({ bodyError: describeError(error) });
+      }
+    } finally {
+      for (const pr of toFetch) {
+        this.bodiesInFlight.delete(pr.id);
+      }
+    }
+  }
+
+  // A parse of `undefined` means the body was asked for and did not arrive; the row keeps the
+  // parse it already had and is marked loaded so nothing asks again.
+  private applyParses(parses: Map<string, IRenovateResolution | undefined>): void {
+    this.patch({
+      prs: this.state.prs.map((pr) => {
+        if (!parses.has(pr.id)) {
+          return pr;
+        }
+        const parse = parses.get(pr.id);
+        return { ...pr, parse: parse ?? pr.parse, bodyLoaded: true };
+      }),
+    });
+  }
+
   private patch(next: Partial<IDashboardState>): void {
     this.state = { ...this.state, ...next };
     for (const listener of this.listeners) {
       listener();
     }
   }
+}
+
+// A body is only worth reusing while the pull request it came from has not changed.
+function cacheKey(pr: IRenovatePr): string {
+  return `${pr.id}@${pr.updatedAt}`;
 }
 
 /**

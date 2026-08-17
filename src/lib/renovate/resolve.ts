@@ -1,26 +1,10 @@
-import type { IDependencyUpdate, IParseResult, IRenovatePr, UpdateSource, UpdateType } from '../types';
+import type { IParseResult, IRenovatePr, IRenovateResolution, UpdateSource, UpdateType } from '../types';
 import { parseBody } from './parseBody';
 import { parseBranch } from './parseBranch';
 import { parseTitle } from './parseTitle';
 
 export { normalizeKey } from './key';
-
-export interface IRenovateResolution {
-  updates: IDependencyUpdate[];
-  isGroupPr: boolean;
-  groupName: string | undefined;
-  updateType: UpdateType;
-  /**
-   * Which parser the updates came from, or `unknown` when none of them recognised anything. A
-   * pull request that resolves to `unknown` is still listed, under "Unrecognised".
-   */
-  source: UpdateSource | 'unknown';
-  /**
-   * Where the sources contradict each other, in words. The winning source is used either way —
-   * this exists so the disagreement is visible rather than silently resolved.
-   */
-  disagreements: string[];
-}
+export type { IRenovateResolution } from '../types';
 
 // A parser has said something useful if it named a dependency, recognised a group, or worked out
 // what kind of update this is. A title like `Update all non-major dependencies` names nothing yet

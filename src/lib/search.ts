@@ -1,9 +1,11 @@
+import { resolveUpdates } from './renovate/resolve';
 import type {
   CheckState,
   IGraphqlRateLimit,
   IOwnerToken,
   IPrCheck,
   IRenovatePr,
+  IRenovateResolution,
   ISettings,
   Mergeable,
   ReviewDecision,
@@ -191,6 +193,20 @@ export const SEARCH_QUERY = `query($q: String!, $first: Int!, $after: String) {
 }`;
 
 /**
+ * Fetches pull request bodies on demand.
+ *
+ * Deliberately kept out of the bulk query: a Renovate body carries entire release-note sections,
+ * so asking for hundreds of them up front is a very slow first paint for information almost none
+ * of the rows need.
+ */
+export const BODIES_QUERY = `query($ids: [ID!]!) {
+  rateLimit { limit cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on PullRequest { id body }
+  }
+}`;
+
+/**
  * Re-asks for the mergeability of pull requests GitHub had not computed yet.
  */
 export const MERGEABLE_QUERY = `query($ids: [ID!]!) {
@@ -358,7 +374,7 @@ export function normalizePr(node: IApiNode | null): IRenovatePr | undefined {
     statusContextState(rollup.state);
 
   const permission = node.repository?.viewerPermission;
-  return {
+  const pr: IRenovatePr = {
     id: node.id,
     repo,
     owner: node.repository?.owner?.login ?? repo.slice(0, Math.max(0, repo.indexOf('/'))),
@@ -381,8 +397,25 @@ export function normalizePr(node: IApiNode | null): IRenovatePr | undefined {
     checkState,
     checks,
     headSha: commit?.oid ?? node.headRefOid ?? '',
+    // Resolved from the title and branch alone for now; the body is folded in if and when it is
+    // fetched, which is what turns a group pull request from a name into a list of packages.
+    parse: EMPTY_PARSE,
+    bodyLoaded: false,
   };
+  return { ...pr, parse: resolveUpdates(pr) };
 }
+
+/**
+ * The placeholder a pull request carries while its own parse is being computed from it.
+ */
+const EMPTY_PARSE: IRenovateResolution = {
+  updates: [],
+  isGroupPr: false,
+  groupName: undefined,
+  updateType: 'unknown',
+  source: 'unknown',
+  disagreements: [],
+};
 
 /**
  * Turns a raw search page into pull requests, dropping anything unrecognisable.

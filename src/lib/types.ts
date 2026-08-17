@@ -129,6 +129,16 @@ export interface IRenovatePr {
   checkState: CheckState;
   checks: IPrCheck[];
   headSha: string;
+  /**
+   * What the parser made of the title, branch and — once loaded — the body. Kept apart from the
+   * raw GitHub fields above so the parser stays testable without an API shape in sight.
+   */
+  parse: IRenovateResolution;
+  /**
+   * Whether the body has been fetched and folded into {@link parse}. Bodies are large and are
+   * only fetched when something actually needs them.
+   */
+  bodyLoaded: boolean;
 }
 
 /**
@@ -161,6 +171,11 @@ export interface IDashboardState {
    * How many pull requests GitHub says match, which can exceed what it will actually hand over.
    */
   totalCount: number;
+  /**
+   * A failure while fetching bodies. Kept apart from {@link error} because the list itself is
+   * still perfectly usable when only the dependency details could not be loaded.
+   */
+  bodyError: string | undefined;
   rateLimit: IGraphqlRateLimit | undefined;
   lastRefreshedAt: number | undefined;
   /**
@@ -213,6 +228,30 @@ export interface IDependencyUpdate {
    */
   manager?: string;
   source: UpdateSource;
+}
+
+/**
+ * What the three parsers together made of a pull request.
+ */
+export interface IRenovateResolution {
+  updates: IDependencyUpdate[];
+  isGroupPr: boolean;
+  /**
+   * The name of the group, when the pull request names one — `all non-major dependencies`,
+   * `jest monorepo`, or whatever a custom `groupName` produced.
+   */
+  groupName: string | undefined;
+  updateType: UpdateType;
+  /**
+   * Which parser the updates came from, or `unknown` when none of them recognised anything. A
+   * pull request that resolves to `unknown` is still listed, under "Unrecognised".
+   */
+  source: UpdateSource | 'unknown';
+  /**
+   * Where the sources contradict each other, in words. The winning source is used either way —
+   * this exists so the disagreement is visible rather than silently resolved.
+   */
+  disagreements: string[];
 }
 
 /**

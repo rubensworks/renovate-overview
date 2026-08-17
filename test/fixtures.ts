@@ -1,3 +1,4 @@
+import { resolveUpdates } from '../src/lib/renovate/resolve';
 import type { IApiNode, ISearchPage } from '../src/lib/search';
 import type { IRenovatePr, ISettings } from '../src/lib/types';
 
@@ -83,7 +84,7 @@ export function page(
  * @param overrides Fields to change.
  */
 export function pr(overrides: Partial<IRenovatePr> = {}): IRenovatePr {
-  return {
+  const base: IRenovatePr = {
     id: 'PR_1',
     repo: 'rubensworks/jbr.js',
     owner: 'rubensworks',
@@ -104,6 +105,18 @@ export function pr(overrides: Partial<IRenovatePr> = {}): IRenovatePr {
     checkState: 'success',
     checks: [{ name: 'build', state: 'success', url: 'https://ci' }],
     headSha: 'deadbeef',
-    ...overrides,
+    parse: {
+      updates: [],
+      isGroupPr: false,
+      groupName: undefined,
+      updateType: 'unknown',
+      source: 'unknown',
+      disagreements: [],
+    },
+    bodyLoaded: false,
   };
+  const merged = { ...base, ...overrides };
+  // The parse follows from the title and branch, so a fixture that changes either gets a parse to
+  // match rather than the placeholder above — unless it states one of its own.
+  return overrides.parse === undefined ? { ...merged, parse: resolveUpdates(merged) } : merged;
 }

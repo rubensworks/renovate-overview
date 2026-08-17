@@ -14,8 +14,8 @@ waiting in 14 repositories, 12 of them green and 2 red — which is exactly the 
 large backlog tractable.
 
 > **Status:** in development. Paste a token and you get the whole backlog: every open Renovate pull
-> request across your account and your organisations, one dense line each, coloured by CI result,
-> expandable to its individual checks. Grouping by dependency, filtering, sorting and the bulk
+> request across your account and your organisations, grouped by dependency or by repository,
+> sorted and filtered however you like, with the view in the URL so you can bookmark it. The bulk
 > actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
 
 ## How it works

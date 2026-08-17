@@ -1,7 +1,7 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GitHubClient } from '../src/lib/githubClient';
-import { MERGEABLE_RETRY_MS, DashboardStore, quotaRatio } from '../src/lib/store';
+import { BODY_BATCH_SIZE, MERGEABLE_RETRY_MS, DashboardStore, quotaRatio } from '../src/lib/store';
 import type { IGraphqlRateLimit, IOwnerToken, ISettings } from '../src/lib/types';
 import { SETTINGS, node, page } from './fixtures';
 
@@ -62,6 +62,7 @@ describe('DashboardStore', () => {
       prs: [],
       loading: false,
       error: undefined,
+      bodyError: undefined,
       totalCount: 0,
       rateLimit: undefined,
       lastRefreshedAt: undefined,
@@ -443,6 +444,194 @@ describe('DashboardStore', () => {
 
       // Two searches and one re-ask, rather than one re-ask per refresh.
       expect(client.graphql).toHaveBeenCalledTimes(3);
+      store.dispose();
+    });
+  });
+
+  describe('loadBodies', () => {
+    const TABLE = [
+      '| Package | Type | Update | Change |',
+      '|---|---|---|---|',
+      '| [eslint](u) | devDependencies | minor | [`8.56.0` -> `8.57.0`](d) |',
+      '| [@types/node](u) | devDependencies | patch | [`20.11.4` -> `20.11.5`](d) |',
+    ].join('\n');
+
+    async function loadedStore(client: IStubClient): Promise<DashboardStore> {
+      const store = makeStore(client);
+      await store.refresh();
+      return store;
+    }
+
+    it('fetches a body and folds it into the parse, turning a group into its packages', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([
+        node({ id: 'G', title: 'Update all non-major dependencies', headRefName: 'renovate/all-minor-patch' }),
+      ]));
+      const store = await loadedStore(client);
+      expect(store.getSnapshot().prs[0]?.parse.updates).toEqual([]);
+
+      client.graphql.mockResolvedValueOnce({ nodes: [{ id: 'G', body: TABLE }]});
+      await store.loadBodies([ 'G' ]);
+
+      const [ loaded ] = store.getSnapshot().prs;
+      expect(loaded?.bodyLoaded).toBe(true);
+      expect(loaded?.parse.source).toBe('body');
+      expect(loaded?.parse.updates.map(entry => entry.groupKey)).toEqual([ 'eslint', 'types-node' ]);
+      store.dispose();
+    });
+
+    it('asks for nothing when every body is already loaded', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockResolvedValueOnce({ nodes: [{ id: 'A', body: TABLE }]});
+      await store.loadBodies([ 'A' ]);
+      const before = client.graphql.mock.calls.length;
+
+      await store.loadBodies([ 'A' ]);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      store.dispose();
+    });
+
+    it('asks for nothing when the list does not hold the pull request', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      const before = client.graphql.mock.calls.length;
+
+      await store.loadBodies([ 'SOMETHING_ELSE' ]);
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      store.dispose();
+    });
+
+    it('reuses a parsed body across refreshes while the pull request has not changed', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockResolvedValueOnce({ nodes: [{ id: 'A', body: TABLE }]});
+      await store.loadBodies([ 'A' ]);
+
+      client.graphql.mockResolvedValue(page([ node({ id: 'A' }) ]));
+      await store.refresh();
+      expect(store.getSnapshot().prs[0]?.bodyLoaded).toBe(false);
+      const before = client.graphql.mock.calls.length;
+
+      await store.loadBodies([ 'A' ]);
+      // Served from the cache: no request, but the parse is back.
+      expect(client.graphql).toHaveBeenCalledTimes(before);
+      expect(store.getSnapshot().prs[0]?.parse.source).toBe('body');
+      store.dispose();
+    });
+
+    it('refetches a body once the pull request has been updated', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockResolvedValueOnce({ nodes: [{ id: 'A', body: TABLE }]});
+      await store.loadBodies([ 'A' ]);
+
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A', updatedAt: '2026-08-16T10:00:00Z' }) ]));
+      await store.refresh();
+      const before = client.graphql.mock.calls.length;
+      client.graphql.mockResolvedValueOnce({ nodes: [{ id: 'A', body: TABLE }]});
+      await store.loadBodies([ 'A' ]);
+
+      expect(client.graphql.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('asks in batches rather than for hundreds of bodies at once', async() => {
+      const client = stubClient();
+      const many = Array.from({ length: BODY_BATCH_SIZE + 3 }, (_unused, index) => node({ id: `P${index}` }));
+      client.graphql.mockResolvedValueOnce(page(many));
+      const store = await loadedStore(client);
+
+      client.graphql.mockResolvedValue({ nodes: []});
+      await store.loadBodies(many.map(entry => String(entry.id)));
+
+      const bodyCalls = client.graphql.mock.calls.filter(call => String(call[0]).includes('body'));
+      expect(bodyCalls).toHaveLength(2);
+      expect((<{ ids: string[] }> bodyCalls[0]?.[1]).ids).toHaveLength(BODY_BATCH_SIZE);
+      store.dispose();
+    });
+
+    it('marks a body GitHub did not hand over as loaded, rather than asking forever', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+
+      client.graphql.mockResolvedValueOnce({ nodes: [ null, { id: 'A', body: null }]});
+      await store.loadBodies([ 'A' ]);
+      expect(store.getSnapshot().prs[0]?.bodyLoaded).toBe(true);
+      expect(store.getSnapshot().prs[0]?.parse.source).toBe('title');
+      store.dispose();
+    });
+
+    it('copes with a response carrying no nodes', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockResolvedValueOnce({});
+      await store.loadBodies([ 'A' ]);
+      expect(store.getSnapshot().prs[0]?.bodyLoaded).toBe(true);
+      store.dispose();
+    });
+
+    it('reports a failure apart from the list, which is still perfectly usable', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockRejectedValueOnce(new Error('body fetch failed'));
+
+      await store.loadBodies([ 'A' ]);
+      expect(store.getSnapshot().bodyError).toBe('body fetch failed');
+      expect(store.getSnapshot().error).toBeUndefined();
+      expect(store.getSnapshot().prs).toHaveLength(1);
+      store.dispose();
+    });
+
+    it('drops an answer that arrives after a newer refresh started', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockImplementationOnce(async() => {
+        store.dispose();
+        return { nodes: [{ id: 'A', body: TABLE }]};
+      });
+
+      await store.loadBodies([ 'A' ]);
+      expect(store.getSnapshot().prs[0]?.bodyLoaded).toBe(false);
+    });
+
+    it('does not report a failure belonging to a superseded refresh', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+      client.graphql.mockImplementationOnce(async() => {
+        store.dispose();
+        throw new Error('stale');
+      });
+
+      await store.loadBodies([ 'A' ]);
+      expect(store.getSnapshot().bodyError).toBeUndefined();
+    });
+
+    it('does not ask twice for a body already in flight', async() => {
+      const client = stubClient();
+      client.graphql.mockResolvedValueOnce(page([ node({ id: 'A' }) ]));
+      const store = await loadedStore(client);
+
+      let release = (_: unknown): void => {};
+      client.graphql.mockImplementationOnce(async() => new Promise((resolve) => {
+        release = resolve;
+      }));
+      const first = store.loadBodies([ 'A' ]);
+      const second = store.loadBodies([ 'A' ]);
+      release({ nodes: [{ id: 'A', body: TABLE }]});
+      await Promise.all([ first, second ]);
+
+      const bodyCalls = client.graphql.mock.calls.filter(call => String(call[0]).includes('body'));
+      expect(bodyCalls).toHaveLength(1);
       store.dispose();
     });
   });
