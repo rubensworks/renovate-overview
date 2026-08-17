@@ -13,8 +13,9 @@ GitHub's own search can list your Renovate PRs. What it cannot tell you is that 
 waiting in 14 repositories, 12 of them green and 2 red — which is exactly the view that makes a
 large backlog tractable.
 
-> **Status:** in development. The scaffold is in place; the setup screen, the dashboard, the parser
-> and the actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
+> **Status:** in development. Authentication works — paste a token and the app signs you in, keeps
+> per-organisation tokens, and stays read-only until you say otherwise. The pull request list, the
+> parser and the actions land in the milestones described in [`CLAUDE.md`](CLAUDE.md).
 
 ## How it works
 
