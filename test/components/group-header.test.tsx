@@ -18,13 +18,13 @@ function group(prs: IRenovatePr[], label = 'lodash'): IGroup {
 
 describe('GroupHeader', () => {
   it('names the group and counts its pull requests', () => {
-    render(<GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.getByText('lodash')).toBeDefined();
     expect(screen.getByText('1 PR')).toBeDefined();
   });
 
   it('pluralises the count', () => {
-    render(<GroupHeader group={group([ pr(), pr({ id: 'b' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr(), pr({ id: 'b' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.getByText('2 PRs')).toBeDefined();
   });
 
@@ -36,7 +36,7 @@ describe('GroupHeader', () => {
       pr({ id: '4', checkState: 'pending' }),
       pr({ id: '5', checkState: 'none' }),
     ];
-    render(<GroupHeader group={group(prs)} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group(prs)} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.getByText('1 green')).toBeDefined();
     // An errored check counts with the failures, not on its own.
     expect(screen.getByText('2 red')).toBeDefined();
@@ -46,14 +46,14 @@ describe('GroupHeader', () => {
 
   it('leaves out the tallies that are zero', () => {
     const { container } = render(
-      <GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />,
+      <GroupHeader mode="dependency" group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />,
     );
     expect(container.querySelectorAll('.tally')).toHaveLength(1);
   });
 
   it('is coloured by the worst state in it', () => {
     const { container } = render(
-      <GroupHeader group={group([ pr(), pr({ id: 'b', checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />,
+      <GroupHeader mode="dependency" group={group([ pr(), pr({ id: 'b', checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />,
     );
     expect(container.querySelector('.group__header--failure')).not.toBeNull();
   });
@@ -62,6 +62,7 @@ describe('GroupHeader', () => {
     const selected: string[][] = [];
     render(
       <GroupHeader
+        mode="dependency"
         group={group([ pr(), pr({ id: 'b', isDraft: true }) ])}
         collapsed={false}
         onToggle={() => {}}
@@ -77,6 +78,7 @@ describe('GroupHeader', () => {
     const selected: string[][] = [];
     render(
       <GroupHeader
+        mode="dependency"
         group={group([ pr(), pr({ id: 'b', isDraft: true }) ])}
         collapsed={false}
         onToggle={() => {}}
@@ -88,7 +90,7 @@ describe('GroupHeader', () => {
   });
 
   it('says nothing about merging when nothing is ready', () => {
-    render(<GroupHeader group={group([ pr({ checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr({ checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.queryByText(/ready to merge/u)).toBeNull();
   });
 
@@ -97,6 +99,7 @@ describe('GroupHeader', () => {
     vi.stubGlobal('navigator', { clipboard: { writeText }});
     render(
       <GroupHeader
+        mode="dependency"
         group={group([ pr({ id: '1', repo: 'rubensworks/rdf-parse.js' }), pr({ id: '2', repo: 'rubensworks/jbr.js' }) ], 'typescript')}
         collapsed={false}
         onToggle={() => {}}
@@ -108,10 +111,31 @@ describe('GroupHeader', () => {
     expect(writeText).toHaveBeenCalledWith('typescript:\n\n* rubensworks/rdf-parse.js\n* rubensworks/jbr.js\n');
   });
 
+  it('copies what a group is keyed on differently, so a repository group lists its pull requests', async() => {
+    const writeText = vi.fn(async(): Promise<void> => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText }});
+    const repo = 'CyclopsMC/forge-update-generator.js';
+    render(
+      <GroupHeader
+        mode="repo"
+        group={group([
+          pr({ id: '1', repo, title: 'Update dependency typescript to v5' }),
+          pr({ id: '2', repo, title: 'Update dependency eslint to v9' }),
+        ], repo)}
+        collapsed={false}
+        onToggle={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText).toHaveBeenCalledWith(`${repo}:\n\n* typescript\n* eslint\n`);
+  });
+
   it('says it copied, then goes back to offering the copy', async() => {
     vi.useFakeTimers();
     vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async(): Promise<void> => {}) }});
-    render(<GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
     // The write settles on the microtask queue, which the fake timers do not drive.
     await act(async() => {
@@ -127,14 +151,14 @@ describe('GroupHeader', () => {
 
   it('says so when the clipboard refuses, rather than looking like nothing happened', async() => {
     vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) }});
-    render(<GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copy failed' })).toBeDefined());
   });
 
   it('reports whether it is collapsed, and asks to be toggled', () => {
     const onToggle = vi.fn();
-    render(<GroupHeader group={group([ pr() ])} collapsed onToggle={onToggle} onSelect={() => {}} />);
+    render(<GroupHeader mode="dependency" group={group([ pr() ])} collapsed onToggle={onToggle} onSelect={() => {}} />);
     const toggle = screen.getByRole('button', { name: '▸' });
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(toggle);

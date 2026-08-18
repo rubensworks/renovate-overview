@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { copyText, formatGroupAsText } from '../lib/clipboard';
-import type { IGroup } from '../lib/selectors';
+import type { GroupMode, IGroup } from '../lib/selectors';
 import { greenIn } from '../lib/selectors';
 import { StatusIcon } from './status-icon';
 
@@ -19,6 +19,11 @@ const COPY_LABELS: Record<CopyState, string> = {
 
 export interface IGroupHeaderProps {
   group: IGroup;
+  /**
+   * How the group was formed, which decides what a copied line says: the heading already carries
+   * what every pull request in the group shares, so the lines carry what differs.
+   */
+  mode: GroupMode;
   collapsed: boolean;
   onToggle: (key: string) => void;
   /**
@@ -32,7 +37,7 @@ export interface IGroupHeaderProps {
  * A group's heading, carrying the roll-up that makes a backlog readable: how many pull requests
  * are in it, and how they split between passing, failing and still running.
  */
-export function GroupHeader({ group, collapsed, onToggle, onSelect }: IGroupHeaderProps) {
+export function GroupHeader({ group, mode, collapsed, onToggle, onSelect }: IGroupHeaderProps) {
   const green = greenIn(group.prs).length;
   const [ copyState, setCopyState ] = useState<CopyState>('idle');
 
@@ -72,7 +77,7 @@ export function GroupHeader({ group, collapsed, onToggle, onSelect }: IGroupHead
         type="button"
         title="Copy this group's name and repositories as plain text"
         onClick={() => {
-          void copyText(formatGroupAsText(group)).then(ok => setCopyState(ok ? 'copied' : 'failed'));
+          void copyText(formatGroupAsText(group, mode)).then(ok => setCopyState(ok ? 'copied' : 'failed'));
         }}
       >
         {COPY_LABELS[copyState]}
