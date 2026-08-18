@@ -127,6 +127,18 @@ export function splitScope(scope: ISearchScope): ISearchScope[] {
 }
 
 /**
+ * Joins alternatives into an explicit `OR` group.
+ *
+ * The parentheses and the `OR` are not decoration. Under `advanced_search=true` GitHub combines
+ * repeated qualifiers with AND, so `author:a author:b` asks for pull requests written by both
+ * people at once and matches nothing at all. Only an explicit group means "either".
+ * @param terms Some qualifiers.
+ */
+function orGroup(terms: string[]): string {
+  return `(${terms.join(' OR ')})`;
+}
+
+/**
  * Builds the search query for one scope.
  *
  * The owner qualifiers are not optional: without at least one, `author:app/renovate` matches every
@@ -145,10 +157,10 @@ export function buildSearchQuery(scope: ISearchScope, authors: string[]): string
   }
   const scopeTerms = owners.map((owner, index) =>
     // The viewer is always the first owner of the shared scope, and `user:` is what matches an
-    // account rather than an organisation. Both qualifiers are OR'd together by GitHub anyway.
+    // account rather than an organisation.
     (index === 0 && scope.tokenOwner === undefined ? `user:${owner}` : `org:${owner}`));
   const authorTerms = authors.map(author => `author:${APP_AUTHORS[author] ?? author}`);
-  return [ 'is:open', 'is:pr', 'archived:false', ...authorTerms, ...scopeTerms ].join(' ');
+  return [ 'is:open', 'is:pr', 'archived:false', orGroup(authorTerms), orGroup(scopeTerms) ].join(' ');
 }
 
 /**

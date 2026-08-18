@@ -80,16 +80,33 @@ describe('describeScope', () => {
 });
 
 describe('buildSearchQuery', () => {
+  // Every one of these is an OR group even when it holds a single term, because
+  // `advanced_search=true` combines repeated qualifiers with AND. `author:a author:b` asks for
+  // pull requests written by two people at once, which is nothing; the same is true of
+  // `user:x org:y`. Both cost this dashboard every one of its rows once, so both are pinned here.
   it('scopes to the viewer and spells the hosted app the way search does', () => {
     expect(buildSearchQuery({ tokenOwner: undefined, owners: [ 'rubensworks' ]}, [ 'renovate[bot]' ]))
-      .toBe('is:open is:pr archived:false author:app/renovate user:rubensworks');
+      .toBe('is:open is:pr archived:false (author:app/renovate) (user:rubensworks)');
   });
 
-  it('uses org: for every owner after the first, and for an organisation token search', () => {
-    expect(buildSearchQuery({ tokenOwner: undefined, owners: [ 'me', 'comunica' ]}, [ 'renovate' ]))
-      .toBe('is:open is:pr archived:false author:renovate user:me org:comunica');
+  it('asks for either author rather than for both at once', () => {
+    expect(buildSearchQuery(
+      { tokenOwner: undefined, owners: [ 'me' ]},
+      [ 'renovate[bot]', 'renovate-bot', 'renovate' ],
+    )).toBe(
+      'is:open is:pr archived:false ' +
+      '(author:app/renovate OR author:renovate-bot OR author:renovate) (user:me)',
+    );
+  });
+
+  it('asks for either owner rather than for both at once', () => {
+    expect(buildSearchQuery({ tokenOwner: undefined, owners: [ 'me', 'comunica', 'solid' ]}, [ 'renovate' ]))
+      .toBe('is:open is:pr archived:false (author:renovate) (user:me OR org:comunica OR org:solid)');
+  });
+
+  it('uses org: for a search running under an organisation token', () => {
     expect(buildSearchQuery({ tokenOwner: 'comunica', owners: [ 'comunica' ]}, [ 'renovate' ]))
-      .toBe('is:open is:pr archived:false author:renovate org:comunica');
+      .toBe('is:open is:pr archived:false (author:renovate) (org:comunica)');
   });
 
   it('spells Dependabot as an app too', () => {
