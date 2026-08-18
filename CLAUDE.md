@@ -101,16 +101,35 @@ curl -sD- -o/dev/null -X OPTIONS -H 'Origin: https://example.com' \
 The consequence is that the fetch is two-phase, and that anything GraphQL-only is simply
 unavailable — `enablePullRequestAutoMerge` among them, which is why there is no auto-merge action.
 
-1. **`GET /search/issues`**, one page of 50 at a time, per scope. Same query as before:
+1. **`GET /search/issues`**, one page of 50 at a time, per scope, with `advanced_search=true`:
 
    ```
-   is:open is:pr archived:false author:app/renovate user:<login> org:<org1> org:<org2>
+   is:open is:pr archived:false (author:app/renovate OR author:renovate-bot OR author:renovate)
+   (user:<login> OR org:<org1> OR org:<org2>)
+   ```
+
+   **The parentheses and the `OR`s are load-bearing, and `advanced_search=true` is what makes them
+   mean anything.** The two go together and neither works without the other:
+
+   - Under `advanced_search=true`, repeated qualifiers are combined with **AND**. So
+     `author:a author:b` asks for pull requests written by two people at once, and
+     `user:x org:y` for repositories owned by two accounts at once. Both match **nothing**, and
+     the dashboard silently shows "No open Renovate pull requests" — which is exactly the bug
+     that shipped. Legacy search ORs them, which is why the query looked right.
+   - Without `advanced_search=true`, an `OR` group is read as literal words and matches nothing
+     either.
+
+   Verify any change to this query against the real API rather than against the test suite, which
+   mocks the client and therefore cannot catch it:
+
+   ```
+   curl -sG https://api.github.com/search/issues --data-urlencode 'advanced_search=true' \
+     --data-urlencode 'q=is:open is:pr (author:app/renovate) (user:rubensworks)' | jq .total_count
    ```
 
    The scope qualifiers are **mandatory** — without at least one, `author:app/renovate` searches
-   all of GitHub. Assert this in code. Pass `advanced_search=true`; the legacy engine is retired.
-   Search is metered in its own much smaller bucket (30/minute), reported apart from the core
-   quota by reading `x-ratelimit-resource`.
+   all of GitHub. Assert this in code. Search is metered in its own much smaller bucket
+   (30/minute), reported apart from the core quota by reading `x-ratelimit-resource`.
 
    Search returns the **body**, so a group pull request lists its packages from the first paint —
    no separate body fetch.
