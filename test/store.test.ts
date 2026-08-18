@@ -7,6 +7,7 @@ import {
   IDLE_POLL_MS,
   MAX_CONSECUTIVE_FAILURES,
   PENDING_POLL_MS,
+  SETTLED_POLL_MS,
   TICK_MS,
   DashboardStore,
   quotaRatio,
@@ -262,6 +263,152 @@ describe('DashboardStore', () => {
       client.getCombinedStatus.mockRejectedValue(new Error('no access'));
       const store = await loaded(client);
       expect(store.getSnapshot().prs[0]?.checkState).toBe('success');
+      store.dispose();
+    });
+  });
+
+  describe('a refresh while the list is already on screen', () => {
+    const ALL = Array.from({ length: PAGE_SIZE + 1 }, (_unused, index) => searchItem({ number: index + 1 }));
+
+    /**
+     * A client whose search pages through `items`, and whose checks all pass.
+     * @param items The search results to serve.
+     */
+    function paging(items = ALL): IStubClient {
+      const client = stubClient();
+      client.searchPrs.mockImplementation(async(_query, page) =>
+        searchPage(items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), items.length));
+      client.getCheckRuns.mockResolvedValue({ notModified: false, runs: [
+        { name: 'build', status: 'completed', conclusion: 'success', details_url: null },
+      ]});
+      return client;
+    }
+
+    /**
+     * Every snapshot the store publishes while `work` runs.
+     * @param store The store to watch.
+     * @param work What to run.
+     */
+    async function snapshotsDuring(
+      store: DashboardStore,
+      work: () => Promise<void>,
+    ): Promise<{ count: number; blank: number }[]> {
+      const seen: { count: number; blank: number }[] = [];
+      const unsubscribe = store.subscribe(() => {
+        const { prs } = store.getSnapshot();
+        seen.push({ count: prs.length, blank: prs.filter(pr => pr.checkState === 'none').length });
+      });
+      await work();
+      unsubscribe();
+      return seen;
+    }
+
+    it('never drops a row, however many pages the search takes', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+      expect(store.getSnapshot().prs).toHaveLength(ALL.length);
+
+      const seen = await snapshotsDuring(store, async() => store.refresh());
+
+      // The old bug: page one of the new pass replaced the list, so this dipped to 50.
+      expect(Math.min(...seen.map(entry => entry.count))).toBe(ALL.length);
+      store.dispose();
+    });
+
+    it('never blanks a row that already had its checks', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+      expect(store.getSnapshot().prs.every(pr => pr.checkState === 'success')).toBe(true);
+
+      const seen = await snapshotsDuring(store, async() => store.refresh());
+
+      // The old bug: a re-searched row came back with no checks and rendered grey until its
+      // enrichment came round again.
+      expect(Math.max(...seen.map(entry => entry.blank))).toBe(0);
+      store.dispose();
+    });
+
+    it('does not fetch again for a pull request GitHub says has not changed', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+      const before = client.getPr.mock.calls.length;
+      expect(before).toBe(ALL.length);
+
+      await store.refresh();
+      expect(client.getPr).toHaveBeenCalledTimes(before);
+      store.dispose();
+    });
+
+    it('leaves an unchanged row entirely alone, down to its identity', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+      const before = store.getSnapshot().prs[0];
+
+      await store.refresh();
+      expect(store.getSnapshot().prs[0]).toBe(before);
+      store.dispose();
+    });
+
+    it('re-reads a pull request whose update time moved, without blanking it first', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+      const before = client.getPr.mock.calls.length;
+
+      const moved = ALL.map((item, index) =>
+        (index === 0 ? searchItem({ number: 1, updated_at: '2026-09-01T10:00:00Z' }) : item));
+      client.searchPrs.mockImplementation(async(_query, page) =>
+        searchPage(moved.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), moved.length));
+
+      const seen = await snapshotsDuring(store, async() => store.refresh());
+
+      expect(client.getPr).toHaveBeenCalledTimes(before + 1);
+      expect(Math.max(...seen.map(entry => entry.blank))).toBe(0);
+      store.dispose();
+    });
+
+    it('still removes a pull request that has been merged or closed', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+
+      const fewer = ALL.slice(1);
+      client.searchPrs.mockImplementation(async(_query, page) =>
+        searchPage(fewer.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), fewer.length));
+      await store.refresh();
+
+      expect(store.getSnapshot().prs).toHaveLength(fewer.length);
+      expect(store.getSnapshot().prs.map(pr => pr.id)).not.toContain(id(1));
+      store.dispose();
+    });
+
+    it('does not claim the dashboard is loading when the refresh is a background one', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      await store.refresh();
+
+      const seen: boolean[] = [];
+      const unsubscribe = store.subscribe(() => seen.push(store.getSnapshot().loading));
+      await store.refresh(true);
+      unsubscribe();
+
+      expect(seen).not.toContain(true);
+      store.dispose();
+    });
+
+    it('still says it is loading for a refresh the user asked for', async() => {
+      const client = paging();
+      const store = makeStore(client);
+      const seen: boolean[] = [];
+      store.subscribe(() => seen.push(store.getSnapshot().loading));
+      await store.refresh();
+
+      expect(seen).toContain(true);
+      expect(store.getSnapshot().loading).toBe(false);
       store.dispose();
     });
   });
@@ -855,6 +1002,53 @@ describe('DashboardStore', () => {
       const before = client.getCheckRuns.mock.calls.length;
 
       await vi.advanceTimersByTimeAsync(PENDING_POLL_MS + TICK_MS);
+      expect(client.getCheckRuns.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('leaves a settled pull request alone for far longer than a running one', async() => {
+      const client = stubClient();
+      client.getCheckRuns.mockResolvedValue({ notModified: false, runs: [
+        { name: 'build', status: 'completed', conclusion: 'success', details_url: null },
+      ]});
+      const store = await started(client);
+      expect(store.getSnapshot().prs[0]?.checkState).toBe('success');
+      const before = client.getCheckRuns.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(PENDING_POLL_MS * 2);
+      expect(client.getCheckRuns).toHaveBeenCalledTimes(before);
+
+      await vi.advanceTimersByTimeAsync(SETTLED_POLL_MS);
+      expect(client.getCheckRuns.mock.calls.length).toBeGreaterThan(before);
+      store.dispose();
+    });
+
+    it('leaves a pull request whose detail never loaded out of the rotation', async() => {
+      const client = stubClient();
+      client.getPr.mockRejectedValue(new Error('gone'));
+      const store = await started(client);
+      expect(store.getSnapshot().prs.length).toBeGreaterThan(0);
+      const before = client.getCheckRuns.mock.calls.length;
+
+      // Its checks have never been read, so there is nothing to re-read: only a refresh can get
+      // it out of this state, and the rotation must not spend requests trying.
+      await vi.advanceTimersByTimeAsync(SETTLED_POLL_MS);
+      expect(client.getCheckRuns).toHaveBeenCalledTimes(before);
+      store.dispose();
+    });
+
+    it('does not hammer a pull request whose checks cannot be read', async() => {
+      const client = stubClient();
+      client.getCheckRuns.mockRejectedValue(new Error('no access'));
+      const store = await started(client);
+      const before = client.getCheckRuns.mock.calls.length;
+
+      // A repository the token cannot read checks for would otherwise be permanently due, and so
+      // asked about on every single tick until the quota ran out.
+      await vi.advanceTimersByTimeAsync(TICK_MS * 5);
+      expect(client.getCheckRuns).toHaveBeenCalledTimes(before);
+
+      await vi.advanceTimersByTimeAsync(SETTLED_POLL_MS);
       expect(client.getCheckRuns.mock.calls.length).toBeGreaterThan(before);
       store.dispose();
     });
