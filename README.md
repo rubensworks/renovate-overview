@@ -104,8 +104,9 @@ Signing out clears both storages. A stored token is never rendered back into the
 
 ## Copying a group out
 
-Every group header carries a **Copy as text** button, which puts the group's name and the
-repositories in it on the clipboard as plain text:
+Every group header carries a **Copy as text** button, which puts the group on the clipboard as
+plain text. The heading already names what the group is keyed on, so each line carries what
+differs — grouped by dependency, that is the repositories waiting on it:
 
 ```
 typescript:
@@ -114,9 +115,20 @@ typescript:
 * rubensworks/rdf-serialize.js
 ```
 
-No links and no counts, so it pastes cleanly into an issue, a chat message, or a prompt to a model.
-A repository is listed once however many pull requests it has in the group, and the order matches
-what is on screen. It needs no token scope and works with write actions off.
+and grouped by repository, it is the dependencies that repository is waiting on:
+
+```
+CyclopsMC/forge-update-generator.js:
+
+* typescript
+* eslint
+* actions/checkout
+```
+
+Grouped by owner or by update type, where both vary, each line carries both. Every pull request in
+the group gets its own line, in the order it is shown in, so the list accounts for exactly as many
+pull requests as the header counts. No links and no counts, so it pastes cleanly into an issue, a
+chat message, or a prompt to a model. It needs no token scope and works with write actions off.
 
 ## View state lives in the URL
 
