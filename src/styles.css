@@ -827,6 +827,12 @@ code {
   flex: 1 1 auto;
 }
 
+/* Wide enough for the longest of its three labels, so reporting a copy does not shuffle the
+   buttons beside it out from under the pointer. */
+.group__copy {
+  min-width: 92px;
+}
+
 .group__breakdown {
   display: flex;
   gap: 6px;

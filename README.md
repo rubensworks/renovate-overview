@@ -102,6 +102,22 @@ than stopping the rest.
 
 Signing out clears both storages. A stored token is never rendered back into the page.
 
+## Copying a group out
+
+Every group header carries a **Copy as text** button, which puts the group's name and the
+repositories in it on the clipboard as plain text:
+
+```
+typescript:
+
+* rubensworks/rdf-parse.js
+* rubensworks/rdf-serialize.js
+```
+
+No links and no counts, so it pastes cleanly into an issue, a chat message, or a prompt to a model.
+A repository is listed once however many pull requests it has in the group, and the order matches
+what is on screen. It needs no token scope and works with write actions off.
+
 ## View state lives in the URL
 
 Grouping, sorting, filters and collapsed groups are kept in the **URL fragment**, so a view like
