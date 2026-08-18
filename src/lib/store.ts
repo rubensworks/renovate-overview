@@ -59,6 +59,14 @@ export const IDLE_POLL_MS = 120_000;
 export const PENDING_POLL_MS = 30_000;
 
 /**
+ * How often a pull request whose checks have settled is looked at again.
+ *
+ * A background refresh no longer re-reads every pull request — that is what used to make the
+ * whole list blink — so this slow rotation is what still notices a re-run on something green.
+ */
+export const SETTLED_POLL_MS = 600_000;
+
+/**
  * The scheduler wakes up this often and decides what, if anything, is due.
  */
 export const TICK_MS = 2000;
@@ -234,11 +242,19 @@ export class DashboardStore {
     let job: Promise<void> | undefined;
     if (now - this.lastFullPoll >= IDLE_POLL_MS * slowdown) {
       this.lastFullPoll = now;
-      job = this.refresh();
+      job = this.refresh(true);
     } else {
+      // Only the pull requests whose checks have already been read once are in the rotation: a
+      // row that has never been enriched has nothing to re-read, and gets there via a refresh.
       const due = this.state.prs
-        .filter(pr => pr.checkState === 'pending')
-        .filter(pr => now - (this.pendingPolledAt.get(pr.id) ?? 0) >= PENDING_POLL_MS * slowdown)
+        .filter((pr) => {
+          const last = this.pendingPolledAt.get(pr.id);
+          if (last === undefined) {
+            return false;
+          }
+          const every = pr.checkState === 'pending' ? PENDING_POLL_MS : SETTLED_POLL_MS;
+          return now - last >= every * slowdown;
+        })
         .slice(0, PENDING_BATCH);
       if (due.length > 0) {
         job = this.pollChecks(due);
@@ -314,11 +330,16 @@ export class DashboardStore {
    * Fetches every configured scope, publishing rows as each page arrives, then fills in the
    * detail each row needs to be judged.
    */
-  public async refresh(): Promise<void> {
+  public async refresh(background = false): Promise<void> {
     this.generation += 1;
     const generation = this.generation;
 
-    this.patch({ loading: true, error: undefined, truncated: []});
+    // What is already on screen. A refresh reconciles against this rather than replacing it, so
+    // rows keep their place and their colour instead of blinking out and filling back in.
+    const previous = new Map(this.state.prs.map(pr => [ pr.id, pr ]));
+    this.patch(background ?
+        { error: undefined, truncated: []} :
+        { loading: true, error: undefined, truncated: []});
 
     const authors = authorsFor(this.settings);
     const groups: IRenovatePr[][] = [];
@@ -329,7 +350,7 @@ export class DashboardStore {
       for (const scope of planSearches(this.viewerLogin, this.settings.orgs, this.ownerTokens)) {
         // A combined scope that hits the ceiling is retried one owner at a time, which is the
         // only lever available: the ceiling is per result set, not per account.
-        const result = await this.fetchScope(scope, authors, generation, groups, totalCount);
+        const result = await this.fetchScope(scope, authors, generation, groups, totalCount, previous);
         if (this.generation !== generation) {
           return;
         }
@@ -338,7 +359,7 @@ export class DashboardStore {
           groups.pop();
           totalCount -= result.issueCount;
           for (const single of splitScope(scope)) {
-            const retried = await this.fetchScope(single, authors, generation, groups, totalCount);
+            const retried = await this.fetchScope(single, authors, generation, groups, totalCount, previous);
             if (this.generation !== generation) {
               return;
             }
@@ -358,6 +379,8 @@ export class DashboardStore {
       return;
     }
 
+    // Every page has landed, so the result set is finally authoritative and anything missing from
+    // it really has been merged or closed.
     const prs = mergePrs(groups);
     const alive = new Set(prs.map(pr => pr.id));
     const keptSelection = this.state.selected.filter(id => alive.has(id));
@@ -373,9 +396,10 @@ export class DashboardStore {
     });
     this.lastFullPoll = Date.now();
 
-    // The rows are on screen; now find out what state each of them is actually in.
-    await this.enrich(prs, generation);
-    if (this.generation === generation) {
+    // Only the rows that are new, or that GitHub says have changed, are worth fetching again.
+    // Re-reading the settled ones is what used to grey the list out for a minute at a time.
+    await this.enrich(prs.filter(pr => !pr.detailLoaded), generation);
+    if (this.generation === generation && !background) {
       this.patch({ loading: false });
     }
   }
@@ -386,6 +410,7 @@ export class DashboardStore {
     generation: number,
     groups: IRenovatePr[][],
     countSoFar: number,
+    previous: Map<string, IRenovatePr>,
   ): Promise<IScopeResult> {
     const query = buildSearchQuery(scope, authors);
     const collected: IRenovatePr[] = [];
@@ -403,12 +428,14 @@ export class DashboardStore {
       for (const item of items) {
         const pr = normalizeSearchItem(item ?? null);
         if (pr !== undefined) {
-          collected.push(pr);
+          collected.push(reconcile(pr, previous.get(pr.id)));
         }
       }
       groups[slot] = collected;
       this.patch({
-        prs: mergePrs(groups),
+        // Mid-refresh, a pull request that has not been seen on this pass is not necessarily
+        // gone — the next page may hold it. Rows are only removed once every page has landed.
+        prs: keepUnseen(mergePrs(groups), previous),
         totalCount: countSoFar + issueCount,
         rateLimit: this.client.rateLimit,
         searchRateLimit: this.client.searchRateLimit,
@@ -473,6 +500,9 @@ export class DashboardStore {
     } catch {
       // Left with no checks, which reads as "no checks" — the same as a commit that has none.
     }
+    // Marked either way. A repository whose checks the token cannot read would otherwise stay
+    // permanently due and be asked about on every single tick.
+    this.pendingPolledAt.set(next.id, Date.now());
     return next;
   }
 
@@ -679,6 +709,50 @@ export class DashboardStore {
       listener();
     }
   }
+}
+
+/**
+ * Folds a freshly searched pull request together with the one already on screen.
+ *
+ * A search result carries none of what makes a row readable — no head commit, no checks, no
+ * mergeability — so taking it at face value would blank every row on every background refresh.
+ * @param fresh A pull request as the search just described it.
+ * @param previous The same pull request as it is currently shown, when it is already there.
+ */
+function reconcile(fresh: IRenovatePr, previous: IRenovatePr | undefined): IRenovatePr {
+  if (previous === undefined) {
+    return fresh;
+  }
+  // GitHub says nothing about it has changed, so neither does anything on the row. Returning the
+  // very same object also means React has no reason to re-render it at all.
+  if (previous.updatedAt === fresh.updatedAt && previous.detailLoaded) {
+    return previous;
+  }
+  // Something did change. The row keeps what it was showing so it does not blink, and is marked
+  // for re-enrichment so the new state replaces it a moment later.
+  return {
+    ...fresh,
+    branch: previous.branch,
+    baseBranch: previous.baseBranch,
+    headSha: previous.headSha,
+    isPrivate: previous.isPrivate,
+    mergeable: previous.mergeable,
+    reviewDecision: previous.reviewDecision,
+    viewerCanMerge: previous.viewerCanMerge,
+    checkState: previous.checkState,
+    checks: previous.checks,
+    detailLoaded: false,
+  };
+}
+
+/**
+ * Adds back the pull requests this pass has not reached yet.
+ * @param fresh What the search has returned so far.
+ * @param previous What was on screen when the refresh started.
+ */
+function keepUnseen(fresh: IRenovatePr[], previous: Map<string, IRenovatePr>): IRenovatePr[] {
+  const seen = new Set(fresh.map(pr => pr.id));
+  return [ ...fresh, ...[ ...previous.values() ].filter(pr => !seen.has(pr.id)) ];
 }
 
 function splitRepo(repo: string): [string, string] {
