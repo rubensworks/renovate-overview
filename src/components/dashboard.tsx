@@ -214,6 +214,7 @@ export function Dashboard({ store, settings }: IDashboardProps) {
           <section key={group.key} className="group">
             <GroupHeader
               group={group}
+              mode={view.group}
               collapsed={collapsed.has(group.key)}
               onToggle={toggleGroup}
               onSelect={select}
