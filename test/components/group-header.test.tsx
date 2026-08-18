@@ -1,12 +1,16 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GroupHeader } from '../../src/components/group-header';
+import { COPIED_FEEDBACK_MS, GroupHeader } from '../../src/components/group-header';
 import type { IGroup } from '../../src/lib/selectors';
 import { countByState, worstState } from '../../src/lib/selectors';
 import type { IRenovatePr } from '../../src/lib/types';
 import { pr } from '../fixtures';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 function group(prs: IRenovatePr[], label = 'lodash'): IGroup {
   return { key: label, label, prs, counts: countByState(prs), worst: worstState(prs) };
@@ -86,6 +90,46 @@ describe('GroupHeader', () => {
   it('says nothing about merging when nothing is ready', () => {
     render(<GroupHeader group={group([ pr({ checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.queryByText(/ready to merge/u)).toBeNull();
+  });
+
+  it('copies the group as plain text', async() => {
+    const writeText = vi.fn(async(): Promise<void> => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText }});
+    render(
+      <GroupHeader
+        group={group([ pr({ id: '1', repo: 'rubensworks/rdf-parse.js' }), pr({ id: '2', repo: 'rubensworks/jbr.js' }) ], 'typescript')}
+        collapsed={false}
+        onToggle={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText).toHaveBeenCalledWith('typescript:\n\n* rubensworks/rdf-parse.js\n* rubensworks/jbr.js\n');
+  });
+
+  it('says it copied, then goes back to offering the copy', async() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async(): Promise<void> => {}) }});
+    render(<GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
+    // The write settles on the microtask queue, which the fake timers do not drive.
+    await act(async() => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeDefined();
+
+    await act(async() => {
+      vi.advanceTimersByTime(COPIED_FEEDBACK_MS);
+    });
+    expect(screen.getByRole('button', { name: 'Copy as text' })).toBeDefined();
+  });
+
+  it('says so when the clipboard refuses, rather than looking like nothing happened', async() => {
+    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) }});
+    render(<GroupHeader group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy as text' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy failed' })).toBeDefined());
   });
 
   it('reports whether it is collapsed, and asks to be toggled', () => {

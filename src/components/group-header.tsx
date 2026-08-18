@@ -1,6 +1,21 @@
+import { useEffect, useState } from 'react';
+import { copyText, formatGroupAsText } from '../lib/clipboard';
 import type { IGroup } from '../lib/selectors';
 import { greenIn } from '../lib/selectors';
 import { StatusIcon } from './status-icon';
+
+/**
+ * How long the copy button reports what happened before going back to offering the copy.
+ */
+export const COPIED_FEEDBACK_MS = 2000;
+
+type CopyState = 'copied' | 'failed' | 'idle';
+
+const COPY_LABELS: Record<CopyState, string> = {
+  copied: 'Copied',
+  failed: 'Copy failed',
+  idle: 'Copy as text',
+};
 
 export interface IGroupHeaderProps {
   group: IGroup;
@@ -19,6 +34,15 @@ export interface IGroupHeaderProps {
  */
 export function GroupHeader({ group, collapsed, onToggle, onSelect }: IGroupHeaderProps) {
   const green = greenIn(group.prs).length;
+  const [ copyState, setCopyState ] = useState<CopyState>('idle');
+
+  // Whatever it last reported goes away on its own. Settling back to `idle` when it is already
+  // `idle` is a no-op React bails out of, so this arms exactly one timer per copy.
+  useEffect(() => {
+    const timer = setTimeout(() => setCopyState('idle'), COPIED_FEEDBACK_MS);
+    return () => clearTimeout(timer);
+  }, [ copyState ]);
+
   return (
     <div className={`group__header group__header--${group.worst}`}>
       <button
@@ -43,6 +67,16 @@ export function GroupHeader({ group, collapsed, onToggle, onSelect }: IGroupHead
         {group.counts.none > 0 ? <span className="tally tally--none">{group.counts.none} unchecked</span> : null}
       </span>
       <span className="group__spacer" />
+      <button
+        className="button button--ghost group__copy"
+        type="button"
+        title="Copy this group's name and repositories as plain text"
+        onClick={() => {
+          void copyText(formatGroupAsText(group)).then(ok => setCopyState(ok ? 'copied' : 'failed'));
+        }}
+      >
+        {COPY_LABELS[copyState]}
+      </button>
       <button
         className="button button--ghost"
         type="button"

@@ -64,6 +64,7 @@ src/
       resolve.ts             Combines the three above with a defined precedence
     store.ts                 Dashboard state + polling scheduler, via useSyncExternalStore
     selectors.ts             Filtering, grouping, sorting, aggregation
+    clipboard.ts             Rendering a group as plain text, and putting it on the clipboard
     actions.ts               Write operations (merge, approve, rebase, close)
     storage.ts               Token and settings persistence
     urlState.ts              Filters/grouping/sorting in the URL fragment
