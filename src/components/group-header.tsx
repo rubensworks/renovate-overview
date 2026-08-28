@@ -31,13 +31,18 @@ export interface IGroupHeaderProps {
    * on this header: it is what turns a dependency group into one merge.
    */
   onSelect: (ids: string[]) => void;
+  /**
+   * Leaves this repository out of the dashboard from now on. Only handed in when the groups are
+   * repositories, since that is the only mode in which a group *is* one repository.
+   */
+  onExclude?: (repo: string) => void;
 }
 
 /**
  * A group's heading, carrying the roll-up that makes a backlog readable: how many pull requests
  * are in it, and how they split between passing, failing and still running.
  */
-export function GroupHeader({ group, mode, collapsed, onToggle, onSelect }: IGroupHeaderProps) {
+export function GroupHeader({ group, mode, collapsed, onToggle, onSelect, onExclude }: IGroupHeaderProps) {
   const green = greenIn(group.prs).length;
   const [ copyState, setCopyState ] = useState<CopyState>('idle');
 
@@ -100,6 +105,18 @@ export function GroupHeader({ group, mode, collapsed, onToggle, onSelect }: IGro
             </button>
           ) :
         null}
+      {onExclude === undefined ?
+        null :
+          (
+            <button
+              className="button button--ghost"
+              type="button"
+              title={`Leave ${group.label} out of the dashboard, until you remove it from the settings`}
+              onClick={() => onExclude(group.label)}
+            >
+              Exclude
+            </button>
+          )}
     </div>
   );
 }

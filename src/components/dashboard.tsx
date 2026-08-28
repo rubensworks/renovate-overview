@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { normalizeRepo } from '../lib/exclusions';
 import { applyOverallStatus } from '../lib/favicon';
 import type { IGroup } from '../lib/selectors';
 import {
@@ -29,6 +30,11 @@ import { StatusFooter } from './status-footer';
 export interface IDashboardProps {
   store: DashboardStore;
   settings: ISettings;
+  /**
+   * Persists a settings change made from the list itself, which is only ever excluding a
+   * repository.
+   */
+  onSettingsChange: (settings: ISettings) => void;
 }
 
 /**
@@ -45,7 +51,7 @@ interface IPending {
  * The view lives in the URL fragment rather than in this component, so "everything failing,
  * grouped by dependency" is a link somebody can bookmark or send.
  */
-export function Dashboard({ store, settings }: IDashboardProps) {
+export function Dashboard({ store, settings, onSettingsChange }: IDashboardProps) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [ view, setView ] = useState<IViewState>(() => readViewState(location.hash));
   const [ now, setNow ] = useState(() => Date.now());
@@ -131,6 +137,17 @@ export function Dashboard({ store, settings }: IDashboardProps) {
   }
 
   const selected = new Set(state.selected);
+
+  // Excluding a repository is a settings change like any other, so it is undone in the settings
+  // like any other. The rows go the moment the store is reconfigured; the search stops asking for
+  // them on the next refresh.
+  function excludeRepo(repo: string): void {
+    const key = repo.toLowerCase();
+    if (settings.excludedRepos.some(entry => normalizeRepo(entry) === key)) {
+      return;
+    }
+    onSettingsChange({ ...settings, excludedRepos: [ ...settings.excludedRepos, repo ]});
+  }
 
   function select(ids: string[]): void {
     store.setSelection([ ...state.selected, ...ids ]);
@@ -218,6 +235,7 @@ export function Dashboard({ store, settings }: IDashboardProps) {
               collapsed={collapsed.has(group.key)}
               onToggle={toggleGroup}
               onSelect={select}
+              onExclude={view.group === 'repo' ? excludeRepo : undefined}
             />
             {collapsed.has(group.key) ?
               null :

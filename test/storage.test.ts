@@ -19,6 +19,7 @@ const SETTINGS_KEY = 'renovate-overview:settings';
 
 const CUSTOM: ISettings = {
   orgs: [ 'comunica' ],
+  excludedRepos: [ 'comunica/incremunica' ],
   extraAuthors: [ 'my-renovate' ],
   includeDependabot: true,
   writeActions: true,

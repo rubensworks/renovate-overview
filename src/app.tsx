@@ -85,7 +85,7 @@ export function SignedIn(props: ISignedInProps) {
       onOwnerTokenRemove={props.onOwnerTokenRemove}
       onLeave={props.onLeave}
     >
-      <Dashboard store={store} settings={settings} />
+      <Dashboard store={store} settings={settings} onSettingsChange={props.onSettingsChange} />
     </AppShell>
   );
 }

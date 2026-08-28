@@ -1248,6 +1248,80 @@ describe('DashboardStore', () => {
     });
   });
 
+  describe('excluded repositories', () => {
+    it('names them in the search, so they are never fetched', async() => {
+      const client = stubClient();
+      const store = makeStore(client, { ...SETTINGS, excludedRepos: [ 'rubensworks/jbr.js' ]});
+      await store.refresh();
+
+      expect(client.searchPrs.mock.calls[0]?.[0]).toContain('-repo:rubensworks/jbr.js');
+      store.dispose();
+    });
+
+    it('drops one the search returned anyway, and does not count it', async() => {
+      const client = stubClient();
+      client.searchPrs.mockResolvedValue(searchPage([
+        searchItem({ number: 1 }),
+        searchItem({
+          number: 2,
+          repository_url: 'https://api.github.com/repos/comunica/incremunica',
+        }),
+      ]));
+      const store = makeStore(client, { ...SETTINGS, excludedRepos: [ 'Comunica/Incremunica' ]});
+      await store.refresh();
+
+      expect(store.getSnapshot().prs.map(entry => entry.id)).toEqual([ id(1) ]);
+      expect(store.getSnapshot().totalCount).toBe(1);
+      store.dispose();
+    });
+
+    it('still pages through a search whose excluded results thin every page out', async() => {
+      const client = stubClient();
+      const full = Array.from({ length: PAGE_SIZE }, (_unused, index) => searchItem({
+        number: index + 1,
+        repository_url: 'https://api.github.com/repos/comunica/incremunica',
+      }));
+      client.searchPrs
+        .mockResolvedValueOnce(searchPage(full, PAGE_SIZE + 1))
+        .mockResolvedValueOnce(searchPage([ searchItem({ number: 999 }) ], PAGE_SIZE + 1));
+      const store = makeStore(client, { ...SETTINGS, excludedRepos: [ 'comunica/incremunica' ]});
+      await store.refresh();
+
+      expect(client.searchPrs).toHaveBeenCalledTimes(2);
+      expect(store.getSnapshot().prs.map(entry => entry.id)).toEqual([ id(999) ]);
+      store.dispose();
+    });
+
+    it('reports the ceiling on what GitHub matched, not on what is left after excluding', async() => {
+      const client = stubClient();
+      client.searchPrs.mockResolvedValue(searchPage([
+        searchItem({ number: 1, repository_url: 'https://api.github.com/repos/comunica/incremunica' }),
+      ], 1000));
+      const store = makeStore(client, { ...SETTINGS, excludedRepos: [ 'comunica/incremunica' ]});
+      await store.refresh();
+
+      expect(store.getSnapshot().truncated).toEqual([{ label: 'rubensworks', count: 1000 }]);
+      store.dispose();
+    });
+
+    it('takes the rows away the moment the setting arrives, without waiting for a refresh', async() => {
+      const client = stubClient();
+      client.searchPrs.mockResolvedValue(searchPage([
+        searchItem({ number: 42 }),
+        searchItem({ number: 7, repository_url: 'https://api.github.com/repos/comunica/incremunica' }),
+      ]));
+      const store = makeStore(client);
+      await store.refresh();
+      store.setSelection([ id(42), 'comunica/incremunica#7' ]);
+
+      store.configure({ ...SETTINGS, excludedRepos: [ 'comunica/incremunica' ]}, []);
+      expect(store.getSnapshot().prs.map(entry => entry.id)).toEqual([ id(42) ]);
+      // The excluded repository's pull request goes, and the one that stayed keeps its tick.
+      expect(store.getSnapshot().selected).toEqual([ id(42) ]);
+      store.dispose();
+    });
+  });
+
   describe('configure', () => {
     it('changes what the next refresh looks at without blanking the rows', async() => {
       const client = stubClient();

@@ -99,8 +99,25 @@ than stopping the rest.
 - Main token: `localStorage` under `renovate-overview:token`, or `sessionStorage` if you tick
   "don't remember me".
 - Organisation tokens: `renovate-overview:owner-tokens` in the same storage.
+- Settings, exclusions included: `renovate-overview:settings` in `localStorage`. No token there.
 
 Signing out clears both storages. A stored token is never rendered back into the page.
+
+## Leaving repositories out
+
+Some repositories are somebody else's problem, or raise so much that they drown out everything
+else. **Settings → Where to look → Excluded repositories** takes one `owner/repository` per line —
+`comunica/incremunica`, or the repository's GitHub URL pasted straight in — and leaves them off the
+dashboard entirely. Grouping by repository puts an **Exclude** button on every group header, which
+adds that repository to the same list.
+
+The exclusions are pushed into the search query itself as `-repo:` qualifiers, so an excluded
+repository normally costs no requests at all. A search query has a length limit, so anything that
+does not fit is dropped from the results instead — the query is the saving, the filter is the
+guarantee.
+
+Excluding is a local setting like any other: it changes nothing on GitHub, Renovate keeps raising
+pull requests for that repository, and removing the line brings it straight back.
 
 ## Copying a group out
 

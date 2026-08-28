@@ -6,6 +6,7 @@ const SETTINGS_KEY = 'renovate-overview:settings';
 
 export const DEFAULT_SETTINGS: ISettings = {
   orgs: [],
+  excludedRepos: [],
   extraAuthors: [],
   includeDependabot: false,
   // Write actions stay off until asked for, so a read-only token is never met with dead buttons.
@@ -185,6 +186,7 @@ export function loadSettings(): ISettings {
   const record = <Record<string, unknown>> parsed;
   return {
     orgs: toStringArray(record.orgs) ?? DEFAULT_SETTINGS.orgs,
+    excludedRepos: toStringArray(record.excludedRepos) ?? DEFAULT_SETTINGS.excludedRepos,
     extraAuthors: toStringArray(record.extraAuthors) ?? DEFAULT_SETTINGS.extraAuthors,
     includeDependabot: record.includeDependabot === true,
     // Anything other than an explicit `true` leaves the app read-only, so a corrupted or

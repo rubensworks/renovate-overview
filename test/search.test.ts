@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_QUERY_LENGTH } from '../src/lib/exclusions';
 import {
   applyChecks,
   applyDetail,
@@ -124,6 +125,29 @@ describe('buildSearchQuery', () => {
   it('refuses to search every pull request', () => {
     expect(() => buildSearchQuery({ tokenOwner: undefined, owners: [ 'me' ]}, []))
       .toThrow('at least one author');
+  });
+
+  it('leaves out an excluded repository of an owner it covers', () => {
+    expect(buildSearchQuery(
+      { tokenOwner: undefined, owners: [ 'me', 'comunica' ]},
+      [ 'renovate' ],
+      [ 'comunica/incremunica' ],
+    )).toBe(
+      'is:open is:pr archived:false (author:renovate) (user:me OR org:comunica) -repo:comunica/incremunica',
+    );
+  });
+
+  it('says nothing about a repository this search could not have matched anyway', () => {
+    expect(buildSearchQuery({ tokenOwner: undefined, owners: [ 'me' ]}, [ 'renovate' ], [ 'comunica/incremunica' ]))
+      .toBe('is:open is:pr archived:false (author:renovate) (user:me)');
+  });
+
+  it('stops adding exclusions before the query grows past what GitHub accepts', () => {
+    const excluded = Array.from({ length: 40 }, (_unused, index) => `comunica/repository-number-${index}`);
+    const query = buildSearchQuery({ tokenOwner: undefined, owners: [ 'comunica' ]}, [ 'renovate' ], excluded);
+    expect(query.length).toBeLessThanOrEqual(MAX_QUERY_LENGTH);
+    expect(query).toContain('-repo:comunica/repository-number-0');
+    expect(query).not.toContain('-repo:comunica/repository-number-39');
   });
 });
 

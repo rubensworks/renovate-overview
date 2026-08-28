@@ -3,8 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Dashboard } from '../../src/components/dashboard';
 import type { DashboardStore } from '../../src/lib/store';
 import { INITIAL_STATE } from '../../src/lib/store';
-import type { IDashboardState } from '../../src/lib/types';
+import type { IDashboardState, ISettings } from '../../src/lib/types';
 import { SETTINGS, pr } from '../fixtures';
+
+/**
+ * The settings the dashboard asked to have persisted, newest last.
+ */
+const settingsChanges: ISettings[] = [];
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -14,6 +19,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   history.replaceState(null, '', '/');
+  settingsChanges.length = 0;
 });
 
 /**
@@ -55,10 +61,20 @@ class FakeStore {
   }
 }
 
-function renderDashboard(state: Partial<IDashboardState> = {}, hash = ''): FakeStore {
+function renderDashboard(
+  state: Partial<IDashboardState> = {},
+  hash = '',
+  settings: ISettings = SETTINGS,
+): FakeStore {
   history.replaceState(null, '', `/${hash}`);
   const store = new FakeStore(state);
-  render(<Dashboard store={store as unknown as DashboardStore} settings={SETTINGS} />);
+  render(
+    <Dashboard
+      store={store as unknown as DashboardStore}
+      settings={settings}
+      onSettingsChange={next => settingsChanges.push(next)}
+    />,
+  );
   return store;
 }
 
@@ -128,6 +144,29 @@ describe('Dashboard', () => {
       renderDashboard({ prs: [ GREEN ]});
       fireEvent.change(screen.getByLabelText('Group'), { target: { value: 'dependency' }});
       expect(location.hash).toBe('#g=dependency');
+    });
+
+    it('excludes a repository from its group header, once', () => {
+      renderDashboard({ prs: [ GREEN, RED ]}, '#g=repo');
+      const [ first ] = screen.getAllByRole('button', { name: 'Exclude' });
+      fireEvent.click(first!);
+      expect(settingsChanges.at(-1)?.excludedRepos).toEqual([ 'comunica/comunica' ]);
+
+      // The settings this dashboard is showing already hold it, so asking again changes nothing.
+      cleanup();
+      renderDashboard(
+        { prs: [ GREEN, RED ]},
+        '#g=repo',
+        { ...SETTINGS, excludedRepos: [ 'https://github.com/Comunica/Comunica' ]},
+      );
+      const [ again ] = screen.getAllByRole('button', { name: 'Exclude' });
+      fireEvent.click(again!);
+      expect(settingsChanges).toHaveLength(1);
+    });
+
+    it('offers no exclusion where a group is not a repository', () => {
+      renderDashboard({ prs: [ GREEN, RED ]}, '#g=dependency');
+      expect(screen.queryByRole('button', { name: 'Exclude' })).toBeNull();
     });
 
     it('groups, with a header per group', () => {
@@ -200,7 +239,13 @@ describe('Dashboard', () => {
     function renderWritable(state: Partial<IDashboardState> = {}, hash = ''): FakeStore {
       history.replaceState(null, '', `/${hash}`);
       const store = new FakeStore(state);
-      render(<Dashboard store={store as unknown as DashboardStore} settings={WRITABLE} />);
+      render(
+        <Dashboard
+          store={store as unknown as DashboardStore}
+          settings={WRITABLE}
+          onSettingsChange={next => settingsChanges.push(next)}
+        />,
+      );
       return store;
     }
 
@@ -351,7 +396,13 @@ describe('Dashboard', () => {
 
     it('closes a confirmation on Escape, from anywhere including a field', () => {
       const store = new FakeStore({ prs: [ GREEN ], selected: [ 'g' ]});
-      render(<Dashboard store={store as unknown as DashboardStore} settings={{ ...SETTINGS, writeActions: true }} />);
+      render(
+        <Dashboard
+          store={store as unknown as DashboardStore}
+          settings={{ ...SETTINGS, writeActions: true }}
+          onSettingsChange={next => settingsChanges.push(next)}
+        />,
+      );
       fireEvent.click(screen.getByRole('button', { name: 'Approve selected' }));
       expect(screen.getByRole('dialog')).toBeDefined();
       fireEvent.keyDown(screen.getByLabelText('Filter'), { key: 'Escape' });

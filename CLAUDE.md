@@ -56,6 +56,7 @@ src/
   lib/
     githubClient.ts          Octokit wrapper: auth, conditional requests, rate-limit bookkeeping
     search.ts                Builds the search query, paginates, normalises results
+    exclusions.ts            Excluded repositories: parsing, matching, query qualifiers
     renovate/
       identify.ts            Is this PR a Renovate PR, and from which bot?
       parseTitle.ts          Title -> dependency/update-type/versions
@@ -127,6 +128,12 @@ unavailable — `enablePullRequestAutoMerge` among them, which is why there is n
    curl -sG https://api.github.com/search/issues --data-urlencode 'advanced_search=true' \
      --data-urlencode 'q=is:open is:pr (author:app/renovate) (user:rubensworks)' | jq .total_count
    ```
+
+   Excluded repositories (`settings.excludedRepos`, `owner/repo`) are appended as `-repo:` terms
+   for the owners a scope covers, but only while the query stays under GitHub's 256-character
+   limit; whatever does not fit is filtered out of the results instead. The query is an
+   optimisation, `filterExcluded` is what actually keeps a repository off the dashboard —
+   `store.configure` applies it to what is already on screen so an exclusion shows immediately.
 
    The scope qualifiers are **mandatory** — without at least one, `author:app/renovate` searches
    all of GitHub. Assert this in code. Search is metered in its own much smaller bucket

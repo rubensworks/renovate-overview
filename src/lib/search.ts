@@ -1,3 +1,4 @@
+import { MAX_QUERY_LENGTH, excludeQualifiers } from './exclusions';
 import type {
   IApiCheckRun,
   IApiPullRequest,
@@ -144,10 +145,15 @@ function orGroup(terms: string[]): string {
  * The owner qualifiers are not optional: without at least one, `author:app/renovate` matches every
  * Renovate pull request on GitHub, which is both useless and expensive. That is asserted rather
  * than assumed.
+ *
+ * Excluded repositories are named as `-repo:` qualifiers so they are never fetched at all, but
+ * only as far as the query length allows — the rest are dropped from the results afterwards, which
+ * is what actually keeps them off the dashboard.
  * @param scope The owners to search in.
  * @param authors The bot logins to match on.
+ * @param excluded Normalised excluded repositories, if any.
  */
-export function buildSearchQuery(scope: ISearchScope, authors: string[]): string {
+export function buildSearchQuery(scope: ISearchScope, authors: string[], excluded: string[] = []): string {
   const owners = scope.owners.filter(owner => owner.trim().length > 0);
   if (owners.length === 0) {
     throw new Error('Refusing to search all of GitHub: a search needs at least one user or org');
@@ -160,7 +166,9 @@ export function buildSearchQuery(scope: ISearchScope, authors: string[]): string
     // account rather than an organisation.
     (index === 0 && scope.tokenOwner === undefined ? `user:${owner}` : `org:${owner}`));
   const authorTerms = authors.map(author => `author:${APP_AUTHORS[author] ?? author}`);
-  return [ 'is:open', 'is:pr', 'archived:false', orGroup(authorTerms), orGroup(scopeTerms) ].join(' ');
+  const query = [ 'is:open', 'is:pr', 'archived:false', orGroup(authorTerms), orGroup(scopeTerms) ].join(' ');
+  const excludeTerms = excludeQualifiers(excluded, owners, MAX_QUERY_LENGTH - query.length);
+  return excludeTerms.length === 0 ? query : `${query} ${excludeTerms.join(' ')}`;
 }
 
 /**
