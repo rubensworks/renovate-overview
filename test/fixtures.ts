@@ -4,6 +4,7 @@ import type { IRenovatePr, ISettings } from '../src/lib/types';
 
 export const SETTINGS: ISettings = {
   orgs: [],
+  excludedRepos: [],
   extraAuthors: [],
   includeDependabot: false,
   writeActions: false,

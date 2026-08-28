@@ -9,6 +9,7 @@ afterEach(cleanup);
 
 const SETTINGS: ISettings = {
   orgs: [],
+  excludedRepos: [],
   extraAuthors: [],
   includeDependabot: false,
   writeActions: false,

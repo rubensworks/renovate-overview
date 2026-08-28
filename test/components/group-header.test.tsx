@@ -89,6 +89,27 @@ describe('GroupHeader', () => {
     expect(selected).toEqual([[ 'rubensworks/jbr.js#42', 'b' ]]);
   });
 
+  it('offers to exclude a repository, but only where a group is one repository', () => {
+    const excluded: string[] = [];
+    const { rerender } = render(
+      <GroupHeader
+        mode="repo"
+        group={group([ pr() ], 'rubensworks/jbr.js')}
+        collapsed={false}
+        onToggle={() => {}}
+        onSelect={() => {}}
+        onExclude={repo => excluded.push(repo)}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Exclude' }));
+    expect(excluded).toEqual([ 'rubensworks/jbr.js' ]);
+
+    rerender(
+      <GroupHeader mode="dependency" group={group([ pr() ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />,
+    );
+    expect(screen.queryByRole('button', { name: 'Exclude' })).toBeNull();
+  });
+
   it('says nothing about merging when nothing is ready', () => {
     render(<GroupHeader mode="dependency" group={group([ pr({ checkState: 'failure' }) ])} collapsed={false} onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.queryByText(/ready to merge/u)).toBeNull();

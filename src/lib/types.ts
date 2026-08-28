@@ -107,6 +107,14 @@ export interface ISettings {
    */
   orgs: string[];
   /**
+   * Repositories left out of the dashboard entirely, as `owner/name`.
+   *
+   * A repository whose Renovate pull requests are somebody else's problem — or that raises so many
+   * that it drowns out everything else — is noise on a dashboard meant for working through a
+   * backlog. Kept as typed, and read through `normalizeExclusions`.
+   */
+  excludedRepos: string[];
+  /**
    * Extra bot logins that count as Renovate, for self-hosted bots running under their own account.
    */
   extraAuthors: string[];

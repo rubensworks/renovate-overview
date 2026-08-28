@@ -39,6 +39,7 @@ export function SettingsPanel(props: ISettingsPanelProps) {
   const { ownerTokens, onOwnerTokenSave, onOwnerTokenRemove } = props;
   const [ orgsDraft, setOrgsDraft ] = useState(settings.orgs.join('\n'));
   const [ authorsDraft, setAuthorsDraft ] = useState(settings.extraAuthors.join('\n'));
+  const [ excludedDraft, setExcludedDraft ] = useState(settings.excludedRepos.join('\n'));
   const [ ownerDraft, setOwnerDraft ] = useState('');
   const [ ownerTokenDraft, setOwnerTokenDraft ] = useState('');
   const [ ownerBusy, setOwnerBusy ] = useState(false);
@@ -52,7 +53,10 @@ export function SettingsPanel(props: ISettingsPanelProps) {
   useEffect(() => {
     setOrgsDraft(settings.orgs.join('\n'));
     setAuthorsDraft(settings.extraAuthors.join('\n'));
-  }, [ settings.orgs, settings.extraAuthors ]);
+    // Excluding a repository from its group header writes straight to the settings, so this
+    // textarea has to follow along rather than keep showing the list as it was when it opened.
+    setExcludedDraft(settings.excludedRepos.join('\n'));
+  }, [ settings.orgs, settings.extraAuthors, settings.excludedRepos ]);
 
   async function submitToken(event: React.FormEvent) {
     event.preventDefault();
@@ -115,6 +119,25 @@ export function SettingsPanel(props: ISettingsPanelProps) {
           <span className="settings__hint">
             One per line. Your own repositories are always included; these are searched alongside
             them.
+          </span>
+        </div>
+        <div className="settings__field">
+          <label className="settings__label" htmlFor="settings-excluded">Excluded repositories</label>
+          <textarea
+            id="settings-excluded"
+            className="settings__textarea"
+            rows={3}
+            spellCheck={false}
+            placeholder="comunica/incremunica"
+            value={excludedDraft}
+            onChange={event => setExcludedDraft(event.target.value)}
+            onBlur={() => onChange({ ...settings, excludedRepos: toList(excludedDraft) })}
+          />
+          <span className="settings__hint">
+            One <code>owner/repository</code> per line, left out of the dashboard entirely — pasting
+            its GitHub URL works too. Excluded repositories are dropped from the search itself where
+            it has room for them, so they usually cost nothing at all. Every repository group header
+            has an <strong>Exclude</strong> button that adds one here.
           </span>
         </div>
       </section>

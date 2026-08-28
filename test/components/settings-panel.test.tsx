@@ -8,6 +8,7 @@ afterEach(cleanup);
 
 const SETTINGS: ISettings = {
   orgs: [ 'comunica' ],
+  excludedRepos: [],
   extraAuthors: [],
   includeDependabot: false,
   writeActions: false,
@@ -67,6 +68,24 @@ describe('SettingsPanel', () => {
     expect(harness.changes.at(-1)?.orgs).toEqual([ 'comunica', 'rubensworks', 'solid' ]);
   });
 
+  it('lists the excluded repositories one per line', () => {
+    const harness = renderPanel({}, { ...SETTINGS, excludedRepos: [ 'comunica/incremunica' ]});
+    expect(harness.changes).toEqual([]);
+    expect((screen.getByLabelText('Excluded repositories') as HTMLTextAreaElement).value)
+      .toBe('comunica/incremunica');
+  });
+
+  it('parses the excluded repositories on blur, pasted URL and all', () => {
+    const harness = renderPanel();
+    const field = screen.getByLabelText('Excluded repositories');
+    fireEvent.change(field, {
+      target: { value: 'comunica/incremunica\nhttps://github.com/rubensworks/jbr.js' },
+    });
+    fireEvent.blur(field);
+    expect(harness.changes.at(-1)?.excludedRepos)
+      .toEqual([ 'comunica/incremunica', 'https://github.com/rubensworks/jbr.js' ]);
+  });
+
   it('parses the extra bot logins on blur', () => {
     const harness = renderPanel();
     const field = screen.getByLabelText('Extra bot logins');
@@ -90,7 +109,7 @@ describe('SettingsPanel', () => {
     );
     rerender(
       <SettingsPanel
-        settings={{ ...SETTINGS, orgs: [ 'solid' ], extraAuthors: [ 'bot' ]}}
+        settings={{ ...SETTINGS, orgs: [ 'solid' ], extraAuthors: [ 'bot' ], excludedRepos: [ 'a/b' ]}}
         tokenLocation="local"
         ownerTokens={[]}
         onChange={() => {}}
@@ -102,6 +121,8 @@ describe('SettingsPanel', () => {
     );
     expect((screen.getByLabelText('Organisations') as HTMLTextAreaElement).value).toBe('solid');
     expect((screen.getByLabelText('Extra bot logins') as HTMLTextAreaElement).value).toBe('bot');
+    // Excluding a repository from its group header writes to the settings from outside this panel.
+    expect((screen.getByLabelText('Excluded repositories') as HTMLTextAreaElement).value).toBe('a/b');
   });
 
   it('names the bots it recognises without configuration', () => {

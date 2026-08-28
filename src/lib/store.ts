@@ -1,4 +1,5 @@
 import { NothingToDoError, backoffFor, mergeMethodFor, runAction } from './actions';
+import { filterExcluded, isExcluded, normalizeExclusions } from './exclusions';
 import type { GitHubClient } from './githubClient';
 import { asHttpError, describeError } from './githubClient';
 import type { ISearchScope } from './search';
@@ -200,6 +201,13 @@ export class DashboardStore {
   public configure(settings: ISettings, ownerTokens: IOwnerToken[]): void {
     this.settings = settings;
     this.ownerTokens = ownerTokens;
+    // Excluding a repository is the one settings change that has to show immediately: waiting for
+    // the next refresh would leave the rows somebody just asked to be rid of sitting on screen.
+    const kept = filterExcluded(this.state.prs, normalizeExclusions(settings.excludedRepos));
+    if (kept.length !== this.state.prs.length) {
+      const alive = new Set(kept.map(pr => pr.id));
+      this.patch({ prs: kept, selected: this.state.selected.filter(id => alive.has(id)) });
+    }
   }
 
   /**
@@ -342,6 +350,7 @@ export class DashboardStore {
         { loading: true, error: undefined, truncated: []});
 
     const authors = authorsFor(this.settings);
+    const excluded = normalizeExclusions(this.settings.excludedRepos);
     const groups: IRenovatePr[][] = [];
     const truncated: ITruncatedScope[] = [];
     let totalCount = 0;
@@ -350,7 +359,7 @@ export class DashboardStore {
       for (const scope of planSearches(this.viewerLogin, this.settings.orgs, this.ownerTokens)) {
         // A combined scope that hits the ceiling is retried one owner at a time, which is the
         // only lever available: the ceiling is per result set, not per account.
-        const result = await this.fetchScope(scope, authors, generation, groups, totalCount, previous);
+        const result = await this.fetchScope(scope, authors, excluded, generation, groups, totalCount, previous);
         if (this.generation !== generation) {
           return;
         }
@@ -359,7 +368,8 @@ export class DashboardStore {
           groups.pop();
           totalCount -= result.issueCount;
           for (const single of splitScope(scope)) {
-            const retried = await this.fetchScope(single, authors, generation, groups, totalCount, previous);
+            const retried =
+              await this.fetchScope(single, authors, excluded, generation, groups, totalCount, previous);
             if (this.generation !== generation) {
               return;
             }
@@ -407,51 +417,63 @@ export class DashboardStore {
   private async fetchScope(
     scope: ISearchScope,
     authors: string[],
+    excluded: string[],
     generation: number,
     groups: IRenovatePr[][],
     countSoFar: number,
     previous: Map<string, IRenovatePr>,
   ): Promise<IScopeResult> {
-    const query = buildSearchQuery(scope, authors);
+    const query = buildSearchQuery(scope, authors, excluded);
     const collected: IRenovatePr[] = [];
     // Published progressively, so this slot is claimed before the first page arrives.
     const slot = groups.push(collected) - 1;
-    let issueCount = 0;
+    let matched = 0;
+    let fetched = 0;
+    let skipped = 0;
 
     for (let page = 1; page <= MAX_PAGES; page++) {
       const response = await this.client.searchPrs(query, page, PAGE_SIZE, scope.tokenOwner);
       if (this.generation !== generation) {
         return { issueCount: 0, truncated: undefined };
       }
-      issueCount = response.total_count ?? 0;
+      matched = response.total_count ?? 0;
       const items = response.items ?? [];
+      fetched += items.length;
       for (const item of items) {
         const pr = normalizeSearchItem(item ?? null);
-        if (pr !== undefined) {
-          collected.push(reconcile(pr, previous.get(pr.id)));
+        if (pr === undefined) {
+          continue;
         }
+        // The query names as many exclusions as it has room for, so anything still arriving here
+        // is one it could not fit — or one excluded since the search was built.
+        if (isExcluded(pr.repo, excluded)) {
+          skipped += 1;
+          continue;
+        }
+        collected.push(reconcile(pr, previous.get(pr.id)));
       }
       groups[slot] = collected;
       this.patch({
         // Mid-refresh, a pull request that has not been seen on this pass is not necessarily
         // gone — the next page may hold it. Rows are only removed once every page has landed.
         prs: keepUnseen(mergePrs(groups), previous),
-        totalCount: countSoFar + issueCount,
+        totalCount: countSoFar + matched - skipped,
         rateLimit: this.client.rateLimit,
         searchRateLimit: this.client.searchRateLimit,
       });
 
-      if (items.length < PAGE_SIZE || collected.length >= issueCount) {
+      if (items.length < PAGE_SIZE || fetched >= matched) {
         break;
       }
     }
 
     // GitHub reports the true match count but hands over at most SEARCH_CEILING of them, so a
-    // count at or above the ceiling means rows are missing, not merely numerous.
-    const truncated = issueCount >= SEARCH_CEILING ?
-        { label: describeScope(scope), count: issueCount } :
+    // count at or above the ceiling means rows are missing, not merely numerous. That is judged on
+    // what the search matched, before the excluded ones were dropped from it.
+    const truncated = matched >= SEARCH_CEILING ?
+        { label: describeScope(scope), count: matched } :
       undefined;
-    return { issueCount, truncated };
+    return { issueCount: matched - skipped, truncated };
   }
 
   /**
